@@ -1,24 +1,64 @@
 import numpy as np
+import scipy as sp
+import matplotlib.pyplot as plt
+import heapq
+from matplotlib.animation import FuncAnimation
+import numpy as np
 import jax
 import jax.numpy as jnp
 from jax import grad, jit
-from scipy.optimize import minimize, differential_evolution
-import control
-from tqdm import tqdm
+from scipy.optimize import minimize, differential_evolution,NonlinearConstraint
 import multiprocessing
+from tqdm import tqdm
+import numpy as np
+import jax
+import jax.numpy as jnp
+from jax import jit, grad
+import optax
 
 
-#4 core functions:
-#inner optimization
-#global outer
-#loss global
-#loss global slack models
 
-def create_loss_function_global(generate_rbf_basis, ctrltype):
+#TODO loss for inner (lbfgs/adam) _p
+
+
+
+# Define the Loss Functions
+
+def create_loss_function_inner(generate_rbf_basis, num_rbfs, generate_smoothing_penalty, lambda_reg, ctrltype='pv',
+                               opttype='first'):
     @jit
     def loss_function(params, inputs):
-        weights, widths, L1, L2 = params
-        x0 = inputs['x0']
+        """
+        Computes the negative log-likelihood.
+
+        params: Tuple containing (weights, widths, L1_flat, L2_flat)
+        inputs: Dictionary containing necessary inputs
+        """
+
+        # Converting adam and lbfgs to generic loss call:
+        gainsize = {
+            'p': 1,
+            'pv': 2, 'pf': 2,
+            'pvi': 3, 'pif': 3, 'pvf': 3,
+            'pvif': 4,
+        }.get(ctrltype, 1)
+
+        # Split the flat parameter vector into components
+        weights = params[:num_rbfs]  # Shape: (num_rbfs, )
+        widths = params[num_rbfs]
+
+        # Get gain parameters
+        L1 = params[num_rbfs + 1:num_rbfs + (gainsize + 1)]
+        L2 = params[(num_rbfs + (gainsize + 1)):num_rbfs + (2 * gainsize + 1)]
+        if opttype == 'first':
+            # Apply Softplus to ensure positivity with 1st order gradient optimizer
+            L1 = jnp.log(1 + jnp.exp(L1))  # Softplus transformation
+            L2 = jnp.log(1 + jnp.exp(L2))  # Softplus transformation
+        elif opttype == 'second':
+            pass
+
+        # weights, widths, L1, L2 = params
+        x0 = inputs['x0']  # Initial state (position and velocity)
         SetpointA_pos = inputs['SetpointA_pos']
         SetpointA_vel = inputs['SetpointA_vel']
         SetpointA_accel = inputs['SetpointA_accel']
@@ -45,7 +85,6 @@ def create_loss_function_global(generate_rbf_basis, ctrltype):
         x = jnp.zeros((N + 1, A.shape[1]))
         x = x.at[0].set(x0)
         u_out = jnp.zeros((N, B.shape[1]))
-
         # Initialize integrator variables
         int_e_pos_1 = jnp.zeros(2)
         int_e_pos_2 = jnp.zeros(2)
@@ -70,7 +109,7 @@ def create_loss_function_global(generate_rbf_basis, ctrltype):
                 return x, u_out
 
             x, u_out = jax.lax.fori_loop(0, N, loop_body, (x, u_out))
-        elif ctrltype == 'pv':
+        if ctrltype == 'pv':
             def loop_body(k, val):
                 x, u_out = val
 
@@ -90,6 +129,7 @@ def create_loss_function_global(generate_rbf_basis, ctrltype):
                 # Convex combOOOOO
                 u = w1[k] * u1 + w2[k] * u2
 
+                # Update state
                 x_next = A @ x[k] + B @ u
                 x = x.at[k + 1].set(x_next)
                 u_out = u_out.at[k].set(u)
@@ -217,7 +257,6 @@ def create_loss_function_global(generate_rbf_basis, ctrltype):
                 return x, u_out
 
             x, u_out = jax.lax.fori_loop(0, N, loop_body, (x, u_out))
-
         elif ctrltype == 'pvif':
             def loop_body(k, val):
                 x, u_out, int_e_pos_1, int_e_pos_2 = val
@@ -256,17 +295,57 @@ def create_loss_function_global(generate_rbf_basis, ctrltype):
         # Compute negative log-likelihood
         residuals = u_out - u_obs
         l = -0.5 * jnp.log(2 * jnp.pi) - 0.5 * jnp.sum(residuals ** 2)
-        loss = -l
+        S_x = generate_smoothing_penalty(num_rbfs)
+        regularization = lambda_reg * (weights @ S_x @ weights.transpose())
+        loss = -l + regularization
         return loss
 
     return loss_function
 
-def create_loss_function_global_slack(generate_rbf_basis, num_rbfs, ctrltype):
+
+def create_loss_function_inner_slack(generate_rbf_basis, num_rbfs, generate_smoothing_penalty, lambda_reg,
+                                     ctrltype='pv',
+                                     opttype='first'):
     @jit
     def loss_function(params, inputs):
-        weights, widths, L1, L2, alpha = params
+        """
+        Computes the negative log-likelihood.
 
-        x0 = inputs['x0']
+        params: Tuple containing (weights, widths, L1_flat, L2_flat)
+        inputs: Dictionary containing necessary inputs
+        """
+
+        # Converting adam and lbfgs to generic loss call:
+        gainsize = {
+            'p': 1,
+            'pv': 2, 'pf': 2,
+            'pvi': 3, 'pif': 3, 'pvf': 3,
+            'pvif': 4,
+        }.get(ctrltype, 1)
+
+        # Split the flat parameter vector into components
+        weights = params[:(2 * num_rbfs)]  # Shape: (num_rbfs, )
+        weights_1 = weights[0:num_rbfs]
+        weights_2 = weights[num_rbfs:]
+        widths = params[2 * num_rbfs]
+
+        # Get gain parameters
+
+        L1 = params[(2 * num_rbfs) + 1:(2 * num_rbfs) + (gainsize + 1)]
+        L2 = params[((2 * num_rbfs) + (gainsize + 1)):((2 * num_rbfs) + (2 * gainsize)) + 1]
+
+        # Get slack parameter:
+        alpha = params[-1]
+
+        if opttype == 'first':
+            # Apply Softplus to ensure positivity with 1st order gradient optimizer
+            L1 = jnp.log(1 + jnp.exp(L1))  # Softplus transformation
+            L2 = jnp.log(1 + jnp.exp(L2))  # Softplus transformation
+        elif opttype == 'second':
+            pass
+
+        # weights, widths, L1, L2 = params
+        x0 = inputs['x0']  # Initial state (position and velocity)
         SetpointA_pos = inputs['SetpointA_pos']
         SetpointA_vel = inputs['SetpointA_vel']
         SetpointA_accel = inputs['SetpointA_accel']
@@ -283,11 +362,8 @@ def create_loss_function_global_slack(generate_rbf_basis, num_rbfs, ctrltype):
 
         N = SetpointA_pos.shape[0]
 
+        # Hidden wegiht softmax
         # Generate RBF basis functions using precomputed centers
-        # num_rbfs = inputs['num_rbfs']
-        weights_1 = weights[0:num_rbfs]
-        weights_2 = weights[num_rbfs:]
-
         X = generate_rbf_basis(tmp, centers, widths)
         z1 = jnp.dot(X, weights_1)
         z2 = jnp.dot(X, weights_2)
@@ -301,12 +377,10 @@ def create_loss_function_global_slack(generate_rbf_basis, num_rbfs, ctrltype):
         # Initialize state and control outputs
         x = jnp.zeros((N + 1, A.shape[1]))
         x = x.at[0].set(x0)
-
         u_out = jnp.zeros((N, B.shape[1]))
         # Initialize integrator variables
         int_e_pos_1 = jnp.zeros(2)
         int_e_pos_2 = jnp.zeros(2)
-
         if ctrltype == 'p':
             def loop_body(k, val):
                 x, u_out = val
@@ -321,7 +395,7 @@ def create_loss_function_global_slack(generate_rbf_basis, num_rbfs, ctrltype):
                 # Compute control inputs using the estimated gains
                 u1 = -L1 * e1
                 u2 = -L2 * e2
-                u3 = jnp.array(-alpha * x[k, 2:].reshape(-1,1))
+                u3 = jnp.array(-alpha * x[k, 2:].reshape(-1, 1))
                 u = w1[k] * u1 + w2[k] * u2 + w3[k] * u3
 
                 x_next = A @ x[k] + (B @ u).flatten()
@@ -330,7 +404,7 @@ def create_loss_function_global_slack(generate_rbf_basis, num_rbfs, ctrltype):
                 return x, u_out
 
             x, u_out = jax.lax.fori_loop(0, N, loop_body, (x, u_out))
-        elif ctrltype == 'pv':
+        if ctrltype == 'pv':
             def loop_body(k, val):
                 x, u_out = val
 
@@ -344,11 +418,15 @@ def create_loss_function_global_slack(generate_rbf_basis, num_rbfs, ctrltype):
                 e2 = jnp.vstack((e_pos_2, e_vel_2))
 
                 # Compute control inputs using the estimated gains
+                # Compute control inputs using the estimated gains
                 u1 = -L1 @ e1
                 u2 = -L2 @ e2
                 u3 = jnp.array(-alpha * x[k, 2:])
+
+                # Convex combOOOOO
                 u = w1[k] * u1 + w2[k] * u2 + w3[k] * u3
 
+                # Update state
                 x_next = A @ x[k] + B @ u
                 x = x.at[k + 1].set(x_next)
                 u_out = u_out.at[k].set(u)
@@ -372,9 +450,12 @@ def create_loss_function_global_slack(generate_rbf_basis, num_rbfs, ctrltype):
                 e2 = jnp.vstack((e_pos_2, e_pred_2))
 
                 # Compute control inputs using the estimated gains
+                # Compute control inputs using the estimated gains
                 u1 = -L1 @ e1
                 u2 = -L2 @ e2
                 u3 = jnp.array(-alpha * x[k, 2:])
+
+                # Convex combOOOOO
                 u = w1[k] * u1 + w2[k] * u2 + w3[k] * u3
 
                 x_next = A @ x[k] + B @ u
@@ -404,8 +485,9 @@ def create_loss_function_global_slack(generate_rbf_basis, num_rbfs, ctrltype):
                 # Compute control inputs using the estimated gains
                 u1 = -L1 @ e1
                 u2 = -L2 @ e2
-
                 u3 = jnp.array(-alpha * x[k, 2:])
+
+                # Convex combOOOOO
                 u = w1[k] * u1 + w2[k] * u2 + w3[k] * u3
 
                 x_next = A @ x[k] + B @ u
@@ -419,6 +501,7 @@ def create_loss_function_global_slack(generate_rbf_basis, num_rbfs, ctrltype):
                 x, u_out, int_e_pos_1, int_e_pos_2 = val
 
                 e_pos_1 = x[k, :2] - SetpointA_pos[k]
+
                 e_pos_2 = x[k, :2] - SetpointB_pos[k]
 
                 ## CLAMPING
@@ -435,8 +518,9 @@ def create_loss_function_global_slack(generate_rbf_basis, num_rbfs, ctrltype):
                 # Compute control inputs using the estimated gains
                 u1 = -L1 @ e1
                 u2 = -L2 @ e2
-
                 u3 = jnp.array(-alpha * x[k, 2:])
+
+                # Convex combOOOOO
                 u = w1[k] * u1 + w2[k] * u2 + w3[k] * u3
 
                 x_next = A @ x[k] + B @ u
@@ -465,6 +549,8 @@ def create_loss_function_global_slack(generate_rbf_basis, num_rbfs, ctrltype):
                 u1 = -L1 @ e1
                 u2 = -L2 @ e2
                 u3 = jnp.array(-alpha * x[k, 2:])
+
+                # Convex combOOOOO
                 u = w1[k] * u1 + w2[k] * u2 + w3[k] * u3
 
                 x_next = A @ x[k] + B @ u
@@ -473,7 +559,6 @@ def create_loss_function_global_slack(generate_rbf_basis, num_rbfs, ctrltype):
                 return x, u_out
 
             x, u_out = jax.lax.fori_loop(0, N, loop_body, (x, u_out))
-
         elif ctrltype == 'pvif':
             def loop_body(k, val):
                 x, u_out, int_e_pos_1, int_e_pos_2 = val
@@ -499,6 +584,8 @@ def create_loss_function_global_slack(generate_rbf_basis, num_rbfs, ctrltype):
                 u1 = -L1 @ e1
                 u2 = -L2 @ e2
                 u3 = jnp.array(-alpha * x[k, 2:])
+
+                # Convex combOOOOO
                 u = w1[k] * u1 + w2[k] * u2 + w3[k] * u3
 
                 x_next = A @ x[k] + B @ u
@@ -511,108 +598,224 @@ def create_loss_function_global_slack(generate_rbf_basis, num_rbfs, ctrltype):
         # Compute negative log-likelihood
         residuals = u_out - u_obs
         l = -0.5 * jnp.log(2 * jnp.pi) - 0.5 * jnp.sum(residuals ** 2)
-        loss = -l
+        S_x = generate_smoothing_penalty(num_rbfs)
+        regularization = lambda_reg * (weights_1 @ S_x @ weights_1.transpose())
+        regularizationb = lambda_reg * (weights_2 @ S_x @ weights_2.transpose())
+        loss = -l + (regularization + regularizationb)*0.5
+
         return loss
 
     return loss_function
 
-def inner_optimization_global(L_params, inputs, loss_function, grad_loss, slack_model=False, maxjaxiter=100):
+
+## Optimization functions: Trust/Lbfgs
+
+
+def stability_constraints(params_flat, inputs, gainsize, multip, epsilon=1e-3):
+    """
+    Computes stability constraints for both controllers.
+
+    Parameters:
+    - params_flat: 1D array of all parameters being optimized.
+    - inputs: Dictionary containing necessary inputs.
+    - gainsize: Number of gains per controller based on ctrltype.
+    - multip: Multiplier based on slack_model (1 or 2).
+    - epsilon: Small buffer to ensure eigenvalues are strictly inside the unit circle.
+
+    Returns:
+    - constraints: 1D array containing constraint values for both controllers.
+                   Each value should be >= 0 to satisfy 1 - max_eig - epsilon >= 0.
+    """
+    # Extract positions based on slack_model
+    if inputs.get('slack_model', False):
+        # slack_model is True
+        weights = params_flat[:inputs['num_rbfs']]  # Shape: (num_rbfs, )
+        widths = params_flat[inputs['num_rbfs']]
+        K1 = params_flat[inputs['num_rbfs'] + 1:inputs['num_rbfs'] + (gainsize + 1)]
+        K2 = params_flat[(inputs['num_rbfs'] + (gainsize + 1)):(inputs['num_rbfs'] + (gainsize * 2 + 1))]
+        # If alpha exists, it's at the end; ignore for gains extraction
+    else:
+        # slack_model is False
+        weights = params_flat[:inputs['num_rbfs']]  # Shape: (num_rbfs, )
+        widths = params_flat[inputs['num_rbfs']]
+        K1 = params_flat[inputs['num_rbfs'] + 1:inputs['num_rbfs'] + (gainsize + 1)]
+        K2 = params_flat[(inputs['num_rbfs'] + (gainsize + 1)):(inputs['num_rbfs'] + (gainsize * 2 + 1))]
+
+    # Define system matrices A and B
+    # These should be part of inputs; adjust accordingly
+    # Assuming 'A' and 'B' are provided in inputs
+    A = inputs['A']
+    B = inputs['B']
+
+    #Expand gain matrices:
+    K1_expanded = np.tile(K1, (2, 1))  # Repeat along the second dimension
+    K2_expanded = np.tile(K2, (2, 1))  # Repeat along the second dimension
+
+
+    # Compute closed-loop A matrices for both controllers
+    #A-BK
+    A_cl1 = A - B @ K1_expanded  # Shape: same as A
+    A_cl2 = A - B @ K2_expanded
+
+    # Compute eigenvalues
+    eigvals1 = np.linalg.eigvals(A_cl1)
+    eigvals2 = np.linalg.eigvals(A_cl2)
+
+    # Compute maximum eigenvalue magnitudes
+    max_eig1 = np.max(np.abs(eigvals1))
+    max_eig2 = np.max(np.abs(eigvals2))
+
+    # Compute constraint values: 1 - max_eig - epsilon >= 0
+    constraint1 = 1 - max_eig1 - epsilon
+    constraint2 = 1 - max_eig2 - epsilon
+
+    return np.array([constraint1, constraint2])
+
+def outer_optimization_lbfgs(inputs, loss_function, grad_loss,hessian_loss=None, ctrltype='pvi',randomize_weights=True,maxiter=10000,tolerance=1e-6,optimizer='trust',slack_model=False,stable_constraint=False):
+    """
+    Performs joint optimization of L1, L2, weights, and widths.
+    Uses a system stability contraint to on the controller gains:
+    explanation: A_aug=A-BK. The eigenvalues
+    inputs: Dictionary containing necessary inputs.
+    loss_function: JAX-compiled loss function.
+    grad_loss: JAX-compiled gradient of the loss function.
+    """
+    # Total parameters:
+    # Converting adam and lbfgs to generic loss call:
+    gainsize = {
+        'p': 1,
+        'pv': 2, 'pf': 2,
+        'pvi': 3, 'pif': 3, 'pvf': 3,
+        'pvif': 4,
+    }.get(ctrltype, 1)
+
+
+    # Initial guess
+    if randomize_weights is True:
+        setit=1
+    else:
+        setit=0
 
     if slack_model is False:
-        L1, L2 = L_params  # L1 and L2 are arrays of shape (3,)
-        # Set n -controlelr -1 weights
-        weight_n = 1
+        multip = 1
     elif slack_model is True:
-        L1, L2, alpha = L_params  # L1 and L2 are arrays of shape (3,)
-        # Set n -controlelr -1 weights
-        weight_n = 2
+        multip = 2
 
 
-    # Initialize random key for reproducibility
-    key = jax.random.PRNGKey(0)  # Seed for reproducibility
+    if slack_model is False:
+        init_weights = np.zeros(inputs['num_rbfs'])+setit*np.ones_like(np.zeros(inputs['num_rbfs']))*np.random.randn(inputs['num_rbfs'])
+        init_widths = np.ones(1)*2.0
+        init_gains = 2.0*(np.abs(np.random.random(gainsize*2))).flatten()
+        initial_guess = np.concatenate((init_weights,init_widths,init_gains))
+    elif slack_model is True:
+        init_weights = np.zeros(inputs['num_rbfs']*2)+setit*np.ones_like(np.zeros(2*inputs['num_rbfs']))*np.random.randn(2*inputs['num_rbfs'])
+        init_widths = np.ones(1)*2.0
+        init_gains = 2.0*(np.abs(np.random.random(gainsize*2))).flatten()
+        init_alpha = (np.abs(np.random.normal(1))*3).flatten()
+        initial_guess = np.concatenate((init_weights,init_widths,init_gains,init_alpha))
 
-    # Define bounds for weights and widths
-    lower_bound = -40.0
-    upper_bound = 40.0
-    width_lower_bound = 0.1
-    width_upper_bound = 15.0
-
-    num_weights = inputs['num_rbfs'] * weight_n
-    weights_init = jnp.zeros(num_weights)
-    widths_init = 1.0
-
-    # Convert to NumPy arrays for the optimizer
-    weights_init = np.array(weights_init)
-    widths_init = np.array(widths_init)
-
-    # Define initial parameters
-    params_init = (weights_init, widths_init)
-
-    # Flatten parameters for optimizer
-    params_init_flat = np.concatenate([params_init[0], np.array([params_init[1]])])
 
     # Define bounds for optimizer
-    weight_bounds = [(lower_bound, upper_bound)] * num_weights
+    lower_weight_bound = -40.0
+    upper_weight_bound = 40.0
+    width_lower_bound = 0.001
+    width_upper_bound = 15.0
+    gain_lower_bound = 0.01
+    gain_upper_bound = 40.0
+    alpha_lower_bound = 0.00001
+    alpha_upper_bound = 30.0
+
+
+    weight_bounds = [(lower_weight_bound, upper_weight_bound)] * (inputs['num_rbfs']*multip)
     width_bounds = [(width_lower_bound, width_upper_bound)]
-    bounds = weight_bounds + width_bounds
-
+    gain_bounds = [(gain_lower_bound, gain_upper_bound)] * gainsize*2
+    alpha_bounds = [(alpha_lower_bound, alpha_upper_bound)]
     if slack_model is False:
-        # Define objective function
-        def objective(params_flat):
-            weights = params_flat[:-1]
-            widths = params_flat[-1]
-            params = (weights, widths, L1, L2)
-            return float(loss_function(params, inputs))
-
-        # Define gradient function
-        def gradient(params_flat):
-            weights = params_flat[:-1]
-            widths = params_flat[-1]
-            params = (weights, widths, L1, L2)
-            grads = grad_loss(params, inputs)
-            grads_flat = np.concatenate([np.array(grads[0]), np.array([grads[1]])])
-            return grads_flat
+        bounds = weight_bounds + width_bounds + gain_bounds
     elif slack_model is True:
-        def objective(params_flat):
-            weights = params_flat[:-1]
-            widths = params_flat[-1]
-            params = (weights, widths, L1, L2, alpha)
-            return float(loss_function(params, inputs))
+        bounds = weight_bounds + width_bounds + gain_bounds + alpha_bounds
 
-            # Define gradient function
 
-        def gradient(params_flat):
-            weights = params_flat[:-1]
-            widths = params_flat[-1]
-            params = (weights, widths, L1, L2, alpha)
-            grads = grad_loss(params, inputs)
-            grads_flat = np.concatenate([np.array(grads[0]), np.array([grads[1]])])
-            return grads_flat
 
-    def callback(xk):
-        print(f"Iteration: {callback.iter}, Loss: {objective(xk)}")
-        callback.iter += 1
+    # Define the objective function
+    def objective(params_flat):
+        return float(loss_function(params_flat, inputs))
 
-    callback.iter = 0
-    # Run the optimizer
-    result = minimize(
-        objective,
-        params_init_flat,
-        method='L-BFGS-B',
-        jac=gradient,
-        options={'maxiter': maxjaxiter}
-    )
+    # Define the gradient function
+    def optimizer_gradient(params_flat):
+        grads = grad_loss(params_flat, inputs)
+        grads_flat = np.array(grads)
+        return grads_flat
+
+    # Define the Hessian function (optional)
+    def optimizer_hessian(params_flat):
+        if hessian_loss is not None:
+            hess = hessian_loss(params_flat, inputs)
+            return np.array(hess)
+        else:
+            raise ValueError("Hessian function was not provided.")
+
+    if optimizer == 'trust':
+        # Run the optimizer
+        result = minimize(
+            objective,
+            initial_guess,
+            method='trust-constr',
+            jac=optimizer_gradient,
+            hess=optimizer_hessian if hessian_loss else None,  # Include if available
+            bounds=bounds,
+            tol=tolerance,
+            options={
+                'gtol': 1e-15,  # Tolerance for the gradient norm
+                'xtol': 1e-20,  # Tolerance for the change in solution
+                'barrier_tol': 1e-6,  # Tolerance for the barrier parameter
+                'maxiter': maxiter,  # Maximum number of iterations
+                'disp': True  # Verbosity level (optional, useful for debugging)
+            }
+        )
+
+    elif optimizer == 'lbfgs':
+        # Run the optimizer
+        result = minimize(
+            objective,
+            initial_guess,
+            method='L-BFGS-B',
+            jac=optimizer_gradient,
+            hess=optimizer_hessian if hessian_loss else None,  # Include if available
+            bounds=bounds,
+            tol=tolerance,
+            options={'maxiter': maxiter, 'disp': True, 'ftol': 1e-15, 'gtol': 1e-10,'maxfun': 10000},
+        )
+        # options = {'maxiter': maxiter, 'disp': True, 'ftol': 1e-8, 'gtol': 1e-8, 'maxfun': 10000},
 
     best_params_flat = result.x
-    best_params = (best_params_flat[:-1], best_params_flat[-1])
     best_loss = result.fun
-    return best_loss, best_params
+
+    # Gather paramters and put in tuple
+    if slack_model is False:
+        weights = best_params_flat[:inputs['num_rbfs']]  # Shape: (num_rbfs, )
+        widths = best_params_flat[inputs['num_rbfs']]
+        L1 = best_params_flat[inputs['num_rbfs'] + 1:inputs['num_rbfs'] + (gainsize + 1)]
+        L2 = best_params_flat[(inputs['num_rbfs'] + (gainsize + 1)):(inputs['num_rbfs'] + (gainsize * 2 + 1))]
+        outtuple=(L1,L2,weights,widths)
+
+    elif slack_model is True:
+        weights = best_params_flat[:(multip*inputs['num_rbfs'])]  # Shape: (num_rbfs, )
+        widths = best_params_flat[multip*inputs['num_rbfs']]
+        L1 = best_params_flat[(multip*inputs['num_rbfs'] + 1):(multip*inputs['num_rbfs'] + (gainsize + 1))]
+        L2 = best_params_flat[((multip*inputs['num_rbfs']) + (gainsize + 1)):((multip*inputs['num_rbfs']) + (gainsize * 2 + 1))]
+        alpha = best_params_flat[-1]
+        outtuple=(L1,L2,weights,widths,alpha)
 
 
-def outer_optimization_global(inputs, inner_optimization, loss_function, grad_loss, ctrltype, slack_model, maxiter=50,
-                              tolerance=1e-3, opttype='global', maxjaxiter=200):
-    # Set iterations for inner optimizaitons
-    maxjaxiter = maxjaxiter
+    return outtuple,best_params_flat, best_loss
+
+
+
+
+## Optimization functions: first-order
+
+def initialize_parameters(inputs, ctrltype='pvi',randomize_weights=True, slack_model=False):
 
     gainsize = {
         'p': 1,
@@ -621,96 +824,120 @@ def outer_optimization_global(inputs, inner_optimization, loss_function, grad_lo
         'pvif': 4,
     }.get(ctrltype, 1)
 
+    key = jax.random.PRNGKey(1)  # Seed for reproducibility
+
+    widths = jnp.array(2.0)
+    # Initialize L1 and L2 gains
+    key, subkey = jax.random.split(key)
+    L1 = jnp.exp(jax.random.normal(subkey, shape=(gainsize, 1)))  # Shape: (2, 4)
+
+    key, subkey = jax.random.split(key)
+    L2 = jnp.exp(jax.random.normal(subkey, shape=(gainsize, 1)))  # Shape: (2, 4)
+
+    # Flatten L1 and L2 for optimization
+    L1_flat = L1.flatten()  # Shape: (8, )
+    L2_flat = L2.flatten()  # Shape: (8, )
+
+    # Initial guess
+    if randomize_weights is True:
+        setit = 1
+    else:
+        setit = 0
     if slack_model is False:
-        param_add = 0
+        weights = (jnp.zeros(inputs['num_rbfs'])) + setit * np.ones_like(np.zeros(inputs['num_rbfs'])) * np.random.randn(inputs['num_rbfs'])
+        #    Combine all parameters into a single tuple
+        params = (weights, widths, L1_flat, L2_flat)
     elif slack_model is True:
-        param_add = 1
+        weights = (jnp.zeros(inputs['num_rbfs'] * 2)) + setit * np.ones_like(np.zeros(inputs['num_rbfs'])) * np.random.randn(inputs['num_rbfs'])
+        log_alpha = jnp.exp(jax.random.normal(subkey, shape=(1)))
+        params = (weights, widths, L1_flat, L2_flat, log_alpha)
 
-    if slack_model is False:
-        def objective(L_params_flat):
-            # L_params_flat has 4 elements: [L1[0], L1[1], L2[0], L2[1]]
-            L1 = L_params_flat[:gainsize]
-            L2 = L_params_flat[gainsize:]
-            L_params = (L1, L2)
-            best_loss, _ = inner_optimization(L_params, inputs, loss_function, grad_loss, slack_model, maxjaxiter)
-            return best_loss
+    return params
+
+
+def setup_optimizer(params, optimizer='adam', learning_rate=1e-3, slack_model=False):
+    # Flatten all parameters into a single vector for optimization
+    if slack_model == False:
+        params_flat = jnp.concatenate([
+            params[0].flatten(),  # weights
+            params[1].flatten(),  # widths
+            params[2],  # L1_flat
+            params[3],  # L2_flat
+        ])
+    elif slack_model == True:
+        params_flat = jnp.concatenate([
+            params[0].flatten(),  # weights
+            params[1].flatten(),  # widths
+            params[2],  # L1_flat
+            params[3],  # L2_flat
+            params[4]  #log alpha
+        ])
+    if optimizer == 'adam':
+        # Define the optimizer (Adam)
+        optimizer = optax.adam(learning_rate)
+    elif optimizer == 'amsgrad':
+        optimizer = optax.amsgrad(learning_rate)
+
+    # Initialize optimizer state
+    opt_state = optimizer.init(params_flat)
+
+    return optimizer, opt_state
+
+
+def optimization_step(params, opt_state, optimizer, loss_function, inputs, ctrltype='p',slack_model=True):
+    gainsize = {
+        'p': 1,
+        'pv': 2, 'pf': 2,
+        'pvi': 3, 'pif': 3, 'pvf': 3,
+        'pvif': 4,
+    }.get(ctrltype, 1)
+
+    # Flatten parameters
+    if slack_model == False:
+        params_flat = jnp.concatenate([
+            params[0].flatten(),  # weights
+            params[1].flatten(),  # widths
+            params[2],  # L1_flat
+            params[3],  # L2_flat
+        ])
+    elif slack_model == True:
+        params_flat = jnp.concatenate([
+            params[0].flatten(),  # weights
+            params[1].flatten(),  # widths
+            params[2].flatten(),  # L1_flat
+            params[3].flatten(),  # L2_flat
+            params[4].flatten(),  # log alpha
+        ])
+
+    # Compute loss and gradients
+    loss, grads = jax.value_and_grad(loss_function)(params_flat, inputs)
+
+    # Update parameters using the optimizer
+    updates, opt_state = optimizer.update(grads, opt_state)
+    params_flat = optax.apply_updates(params_flat, updates)
+
+    # Unflatten parameters back to original shapes
+    num_weights = params[0].shape[0]
+    weights = params_flat[:num_weights]
+    widths = params_flat[num_weights]
+    if slack_model == False:
+        llflat  = params_flat[(1 + num_weights):]
+        L1_flat = llflat[0:gainsize]
+        L2_flat = llflat[gainsize:]
+        # Return updated parameters, optimizer state, and loss
+        new_params = (weights, widths, L1_flat, L2_flat)
 
     elif slack_model is True:
-        def objective(L_params_flat):
-            # L_params_flat has 5 elements: [L1[0], L1[1], L2[0], L2[1], alpha]
-            L1 = L_params_flat[:gainsize]
-            L2 = L_params_flat[gainsize:-1]
-            alpha = L_params_flat[-1]
-            L_params = (L1, L2, alpha)
-            best_loss, _ = inner_optimization(L_params, inputs, loss_function, grad_loss, slack_model, maxjaxiter)
-            return best_loss
+        llflat=params_flat[(1 + num_weights):]
+        #Leaves just L and alpha
+        #grab alpha from end
+        log_alpha = llflat[-1]
 
-    # Initial guesses for L1 and L2 gains (flattened) (param_add is 1 if slack_model is true)
-    L_init_flat = np.zeros((2 * gainsize) + param_add)  # 2 gains per controller + alpha
+        L1_flat = llflat[0:gainsize]
+        L2_flat = llflat[gainsize:-1]
 
-    # Bounds for gain elements (if necessary)
-    bounds = [(0.01, 15)] * int((2 * gainsize) + param_add)  # Adjust bounds as needed
+        # Return updated parameters, optimizer state, and loss
+        new_params = (weights, widths, L1_flat, L2_flat,log_alpha)
 
-    pbar = tqdm(total=maxiter)  # total equals maxiter
-
-    def optimization_callback(L_params_flat, convergence=None):
-        loss = objective(L_params_flat)  # Evaluate the loss
-        pbar.update(1)
-        pbar.set_postfix({'loss': loss})
-
-    def nelder_callback(L_params_flat):
-        pbar.update(1)
-
-    if opttype == 'global':
-        result = differential_evolution(
-            objective,
-            bounds,
-            maxiter=maxiter,
-            strategy='best1bin',
-            tol=tolerance,
-            disp=True,
-            callback=optimization_callback
-        )
-
-    elif opttype == 'local':
-        result = minimize(
-            objective,
-            np.abs(np.random.randn(param_add+(gainsize * 2))),
-            method='Nelder-Mead', callback=nelder_callback, bounds=bounds,
-            options={
-                'maxiter': maxiter,
-                'adaptive': True,
-                'xatol': 1e-6,
-                'fatol': 1e-10,
-                'disp': True,
-            }
-        )
-
-    best_L_params_flat = result.x
-    best_loss = result.fun
-
-    if slack_model is False:
-        # Extract best L1 and L2
-        L1 = best_L_params_flat[:gainsize]
-        L2 = best_L_params_flat[gainsize:]
-
-        # After finding the best L1 and L2, run inner_optimization one more time to get the best RBF params
-        best_loss_inner, best_params = inner_optimization((L1, L2), inputs, loss_function, grad_loss, slack_model, maxjaxiter)
-
-        outtuple = (L1, L2)
-    elif slack_model is True:
-        # Extract best L1 and L2
-        L1 = best_L_params_flat[:gainsize]
-        L2 = best_L_params_flat[gainsize:-1]
-        alpha = best_L_params_flat[-1]
-
-        # After finding the best L1 and L2 and alpha, run inner_optimization one more time to get the best RBF params
-        best_loss_inner, best_params = inner_optimization((L1, L2, alpha), inputs, loss_function, grad_loss, slack_model, maxjaxiter)
-        outtuple = (L1, L2, alpha)
-
-    return outtuple, best_params, best_loss_inner
-
-
-
-
+    return new_params, opt_state, loss
 
