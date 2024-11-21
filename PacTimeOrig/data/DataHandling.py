@@ -237,7 +237,7 @@ def get_psth_EMU(datafile):
     return psths
 
 
-def retrievepositions(datafile,dattype='nhp',rescale = True):
+def retrievepositions(datafile, dattype='nhp', rescale = 0.001):
     '''
 
     :param dattype: 'NHP' or 'HH'
@@ -253,8 +253,11 @@ def retrievepositions(datafile,dattype='nhp',rescale = True):
 
             selfpos = pd.DataFrame(np.array(pd.DataFrame(d['self_pos'][0][0][0][:, :]).values)).rename(columns={0: 'selfXpos', 1: 'selfYpos'})
             if rescale is not None:
-                selfpos['selfXpos'] = (selfpos['selfXpos']-rescaler[0])/rescaler[0]
-                selfpos['selfYpos'] = (selfpos['selfYpos']-rescaler[1])/rescaler[1]
+                selfpos['selfXpos'] = selfpos['selfXpos']*rescale
+                selfpos['selfYpos'] = selfpos['selfYpos']*rescale
+                #old and distorts
+                # selfpos['selfXpos'] = (selfpos['selfXpos']-rescaler[0])/rescaler[0]
+                # selfpos['selfYpos'] = (selfpos['selfYpos']-rescaler[1])/rescaler[1]
 
 
             # For prey/predator vars, let's make the number of columns equal for simplicity and index by expvars
@@ -266,7 +269,8 @@ def retrievepositions(datafile,dattype='nhp',rescale = True):
 
                 if rescale is not None:
                     for iter, col in enumerate(p1.columns):
-                        p1[col]=(p1[col]-rescaler[iter])/rescaler[iter]
+                        p1[col] = p1[col]*rescale
+                        # p1[col]=(p1[col]-rescaler[iter])/rescaler[iter]
 
                 pos = pd.concat([selfpos,p1, p2, p3], axis=1)
 
@@ -277,9 +281,11 @@ def retrievepositions(datafile,dattype='nhp',rescale = True):
 
                 if rescale is not None:
                     for iter, col in enumerate(p1.columns):
-                        p1[col]=(p1[col]-rescaler[iter])/rescaler[iter]
+                        p1[col] = p1[col]*rescale
+                        # p1[col]=(p1[col]-rescaler[iter])/rescaler[iter]
                     for iter, col in enumerate(p2.columns):
-                        p2[col]=(p2[col]-rescaler[iter])/rescaler[iter]
+                        p2[col] = p2[col]*rescale
+                        # p2[col]=(p2[col]-rescaler[iter])/rescaler[iter]
 
                 pos = pd.concat([selfpos,p1, p2, p3], axis=1)
             elif d['numNPCs'][0][0][0] == 2 and d['numPrey'][0][0][0] == 1: #1 prey 1 pred scenario
@@ -289,9 +295,11 @@ def retrievepositions(datafile,dattype='nhp',rescale = True):
 
                 if rescale is not None:
                     for iter, col in enumerate(p1.columns):
-                        p1[col]=(p1[col]-rescaler[iter])/rescaler[iter]
+                        p1[col] = p1[col]*rescale
+                        # p1[col]=(p1[col]-rescaler[iter])/rescaler[iter]
                     for iter, col in enumerate(p3.columns):
-                        p3[col]=(p3[col]-rescaler[iter])/rescaler[iter]
+                        p3[col] = p3[col]*rescale
+                        # p3[col]=(p3[col]-rescaler[iter])/rescaler[iter]
 
                 pos = pd.concat([selfpos,p1, p2, p3], axis=1)
 
@@ -303,11 +311,14 @@ def retrievepositions(datafile,dattype='nhp',rescale = True):
 
                 if rescale is not None:
                     for iter, col in enumerate(p1.columns):
-                        p1[col] = (p1[col] - rescaler[iter]) / rescaler[iter]
+                        p1[col] = p1[col]*rescale
+                        # p1[col] = (p1[col] - rescaler[iter]) / rescaler[iter]
                     for iter, col in enumerate(p2.columns):
-                        p2[col] = (p2[col] - rescaler[iter]) / rescaler[iter]
+                        p2[col] = p2[col]*rescale
+                        # p2[col] = (p2[col] - rescaler[iter]) / rescaler[iter]
                     for iter, col in enumerate(p3.columns):
-                        p3[col] = (p3[col] - rescaler[iter]) / rescaler[iter]
+                        p3[col] = p3[col]*rescale
+                        # p3[col] = (p3[col] - rescaler[iter]) / rescaler[iter]
 
                 pos = pd.concat([selfpos,p1, p2, p3], axis=1)
 
@@ -322,9 +333,11 @@ def retrievepositions(datafile,dattype='nhp',rescale = True):
             selfpos=pd.DataFrame()
             for nm in selfnames.keys():
                 selfpos[selfnames[nm]]=datafile.iloc[trial][nm][0].astype('float32')
-            if rescale is True:
-                selfpos['selfXpos'] = (selfpos['selfXpos'] - rescaler[0]) / rescaler[0]
-                selfpos['selfYpos'] = (selfpos['selfYpos'] - rescaler[1]) / rescaler[1]
+            if rescale is not None:
+                selfpos['selfXpos']= selfpos['selfXpos']*rescale
+                selfpos['selfYpos']= selfpos['selfYpos']*rescale
+                # selfpos['selfXpos'] = (selfpos['selfXpos'] - rescaler[0]) / rescaler[0]
+                # selfpos['selfYpos'] = (selfpos['selfYpos'] - rescaler[1]) / rescaler[1]
 
             #Get prey 1
             if datafile.iloc[trial]['numPrey']==1 and datafile.iloc[trial]['numNPCs']==1:
@@ -335,9 +348,10 @@ def retrievepositions(datafile,dattype='nhp',rescale = True):
                 p2 = pd.DataFrame(np.zeros((len(p1), 2)) * np.NAN).rename(columns={0: 'prey2Xpos', 1: 'prey2Ypos'})
                 p3 = pd.DataFrame(np.zeros((len(p1), 2)) * np.NAN).rename(columns={0: 'predXpos', 1: 'predYpos'})
 
-                if rescale is True:
+                if rescale is not None:
                     for iter, col in enumerate(p1.columns):
-                        p1[col]=(p1[col]-rescaler[iter])/rescaler[iter]
+                        p1[col] = p1[col]*rescale
+                        # p1[col]=(p1[col]-rescaler[iter])/rescaler[iter]
 
             elif datafile.iloc[trial]['numPrey']==2 and datafile.iloc[trial]['numNPCs']==2:
                 p1 = pd.DataFrame()
@@ -348,11 +362,13 @@ def retrievepositions(datafile,dattype='nhp',rescale = True):
                                prey2Ypos=datafile.iloc[trial]['NPC_yPath'][1].flatten())
                 p3 = pd.DataFrame(np.zeros((len(p1), 2)) * np.NAN).rename(columns={0: 'predXpos', 1: 'predYpos'})
 
-                if rescale is True:
+                if rescale is not None:
                     for iter, col in enumerate(p1.columns):
-                        p1[col]=(p1[col]-rescaler[iter])/rescaler[iter]
+                        p1[col] = p1[col]*rescale
+                        # p1[col]=(p1[col]-rescaler[iter])/rescaler[iter]
                     for iter, col in enumerate(p2.columns):
-                        p2[col]=(p2[col]-rescaler[iter])/rescaler[iter]
+                        p2[col] = p2[col]*rescale
+                        # p2[col]=(p2[col]-rescaler[iter])/rescaler[iter]
 
             elif datafile.iloc[trial]['numPrey']==1 and datafile.iloc[trial]['numNPCs']==2:
                 p1 = pd.DataFrame()
@@ -363,12 +379,13 @@ def retrievepositions(datafile,dattype='nhp',rescale = True):
                 p3 = p3.assign(predXpos=datafile.iloc[trial]['NPC_xPath'][1].flatten(),
                                predYpos=datafile.iloc[trial]['NPC_yPath'][1].flatten())
 
-                if rescale is True:
+                if rescale is not None:
                     for iter, col in enumerate(p1.columns):
-                        p1[col]=(p1[col]-rescaler[iter])/rescaler[iter]
+                        p1[col] = p1[col]*rescale
+                        # p1[col]=(p1[col]-rescaler[iter])/rescaler[iter]
                     for iter, col in enumerate(p3.columns):
-                        p3[col]=(p3[col]-rescaler[iter])/rescaler[iter]
-
+                        p3[col] = p3[col]*rescale
+                        # p3[col]=(p3[col]-rescaler[iter])/rescaler[iter]
 
             positions.append(pd.concat([selfpos,p1, p2, p3], axis=1))
 
@@ -386,18 +403,19 @@ def retrievepositions(datafile,dattype='nhp',rescale = True):
             if xp.shape[1] == 1:
                 tmp = np.vstack(
                     (x, y, xp[:, 0].flatten(), yp[:, 0].flatten())).transpose()
-                normalizer = np.tile(rescaler, (1, 2))[0].reshape(-1, 1).transpose()
-                tmp = (tmp - normalizer) / normalizer
+                normalizer = np.tile(rescale, (1, 2))[0].reshape(-1, 1).transpose()
+                tmp = tmp*normalizer
+                # tmp = (tmp - normalizer) / normalizer
                 positions.append(pos.assign(selfXpos=tmp[:,0],selfYpos=tmp[:,1],prey1Xpos=tmp[:,2],prey1Ypos=tmp[:,3],
                            prey2Xpos=np.NAN,prey2Ypos=np.NAN,predXpos=np.NAN,predYpos=np.NAN))
 
             elif xp.shape[1] == 2:
                 tmp = np.vstack((x, y, xp[:, 0].flatten(), yp[:, 0].flatten(), xp[:, 1].flatten(),yp[:, 1].flatten())).transpose()
-                normalizer = np.tile(rescaler, (1, 3))[0].reshape(-1,1).transpose()
-                tmp = (tmp-normalizer)/normalizer
+                normalizer = np.tile(rescale, (1, 3))[0].reshape(-1,1).transpose()
+                tmp = tmp*normalizer
+                # tmp = (tmp-normalizer)/normalizer
                 positions.append(pos.assign(selfXpos=tmp[:, 0], selfYpos=tmp[:, 1], prey1Xpos=tmp[:, 2], prey1Ypos=tmp[:, 3],
                                prey2Xpos=tmp[:,4], prey2Ypos=tmp[:,5], predXpos=np.NAN, predYpos=np.NAN))
-
 
     return positions
 

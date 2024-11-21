@@ -21,7 +21,7 @@ def monkey_run(cfgparams):
     sessvars = dh.getvars(datafile)
 
     # Get position data
-    positions = dh.retrievepositions(datafile,dattype='nhp', rescale=[960.00, 540.00])
+    positions = dh.retrievepositions(datafile,dattype='nhp', rescale=cfgparams['scaling'])
     if cfgparams['area'] == 'pMD':
         psth = dh.get_psth(datafile, win_shift=30)
     else:
@@ -29,7 +29,7 @@ def monkey_run(cfgparams):
 
     kinematics = dp.computederivatives(positions,
                                        vartodiff=['selfXpos', 'selfYpos', 'prey1Xpos', 'prey1Ypos', 'prey2Xpos',
-                                                  'prey2Ypos'], dt=1.0 / 60.0)
+                                                  'prey2Ypos'], dt=1.0 / 60.0,smooth=True)
     # sessvars = dp.get_reaction_time(sessvars,kinematics)
     sessvars = dh.get_matlab_wt_reaction_time(sessvars, session=cfgparams['session'], subj=cfgparams['subj'])
     # Select 2 prey trials
@@ -69,16 +69,15 @@ def monkey_run(cfgparams):
     return Xdsgn, kinematics, sessvars, psth
 
 
+
 def human_emu_run(cfgparams):
-
-
     # Dataloader, + #sessvar maker,
     sessvars, neural = dh.dataloader_EMU(folder=cfgparams['folder'], subj=cfgparams['subj'])
 
     dataall = neural['neuronData']
 
     # position getter and scaler (all alignedf already to chase_start)
-    positions = dh.retrievepositions(dataall, dattype='hemu')
+    positions = dh.retrievepositions(dataall, dattype='hemu', rescale=cfgparams['scaling'])
 
     # compute derivatives
     kinematics = dp.computederivatives(positions,

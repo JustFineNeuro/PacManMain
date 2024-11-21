@@ -51,8 +51,8 @@ def generate_sim_switch(inputs, widths, weights,slack_model=False):
 
 
 def generate_sim_gains(ngain):
-    L1 = np.random.random(ngain)*np.random.randint(1,4,ngain)+1.0
-    L2 = np.random.random(ngain)*np.random.randint(1,4,ngain)+1.0
+    L1 = np.random.random(ngain)*np.random.randint(1,5,ngain)+1.0
+    L2 = np.random.random(ngain)*np.random.randint(1,5,ngain)+1.0
     return L1, L2
 
 
