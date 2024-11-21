@@ -5,7 +5,7 @@ results_path: 'C:/Users/Justin/Documents/GitHub/PacManMain/ChangeOfMind/results/
 
 cfgparams:
   subj : 'H'
-  session : 2
+  session : 1
   models: ['pv','pf','pvi','pif','pvf']
   ngains : [2,2,3,3,3]
   opttype : "second" # Adam and Lbfgs
