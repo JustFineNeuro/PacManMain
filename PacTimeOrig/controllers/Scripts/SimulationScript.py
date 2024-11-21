@@ -18,7 +18,7 @@ import multiprocessing as mp
 # TODO implement cross-test validation.
 
 def simulate(cfgparams):
-    results = pd.DataFrame(columns=['model','nrbf','opttype','gpscaler','runidx','gainmse','tlength','runtime',
+    results = pd.DataFrame(columns=['trial','model','nrbf','opttype','gpscaler','runidx','gainmse','tlength','runtime',
                                   'posmse','poscorr','wtcorr','wtmse'])
     # Use monkey data
     Xdsgn, kinematics, sessvars, psth = scripts.monkey_run(cfgparams)
@@ -26,7 +26,7 @@ def simulate(cfgparams):
     # trials to use
     trialidx = np.sort(np.random.randint(1, len(Xdsgn), cfgparams['trials']))
 
-    #Get system parameters
+    # Get system parameters
     A, B = ut.define_system_parameters()
 
     total_iterations = (
@@ -42,6 +42,7 @@ def simulate(cfgparams):
             for modidx, modname in enumerate(cfgparams['models']):
                 for rbfidx, num_rbfs in enumerate(cfgparams['rbfs']):
                     for gpscalidx, gpscaler in enumerate(cfgparams['gpscaler']):
+                        trialidx = np.sort(np.random.randint(1, len(Xdsgn), cfgparams['trials']))
                         for _,trial in enumerate(trialidx):
                             for restart in range(cfgparams['restarts']):
 
@@ -50,7 +51,8 @@ def simulate(cfgparams):
 
                                 #generate gains
                                 L1,L2=ut.generate_sim_gains(cfgparams['ngains'][modidx])
-
+                                L1=L1 *3.0
+                                L2=L2 *3.0
 
                                 if cfgparams['slack'] is False:
                                     #Simulate data
@@ -68,6 +70,25 @@ def simulate(cfgparams):
                                         outputs = sim.controller_sim_pvf(tdat, 6, L1, L2, A=None, B=None, gpscaler=gpscaler)
                                     elif modname == 'pvif':
                                         outputs = sim.controller_sim_pvif(tdat, 6, L1, L2, A=None, B=None, gpscaler=gpscaler)
+                                elif cfgparams['slack'] is True:
+                                    #Simulate data
+                                    if modname == 'p':
+                                        outputs = sim.controller_sim_p_slack(tdat, 6, L1, L2, A=None, B=None, gpscaler=gpscaler,alpha=cfgparams['alpha'])
+                                    elif modname == 'pv':
+                                        outputs = sim.controller_sim_pv_slack(tdat, 6, L1, L2, A=None, B=None, gpscaler=gpscaler,alpha=cfgparams['alpha'])
+                                    elif modname == 'pf':
+                                        outputs = sim.controller_sim_pf_slack(tdat, 6, L1, L2, A=None, B=None, gpscaler=gpscaler,alpha=cfgparams['alpha'])
+                                    elif modname == 'pvi':
+                                        outputs = sim.controller_sim_pvi_slack(tdat, 6, L1, L2, A=None, B=None, gpscaler=gpscaler,alpha=cfgparams['alpha'])
+                                    elif modname == 'pif':
+                                        outputs = sim.controller_sim_pif_slack(tdat, 6, L1, L2, A=None, B=None, gpscaler=gpscaler,alpha=cfgparams['alpha'])
+                                    elif modname == 'pvf':
+                                        outputs = sim.controller_sim_pvf_slack(tdat, 6, L1, L2, A=None, B=None, gpscaler=gpscaler,alpha=cfgparams['alpha'])
+                                    elif modname == 'pvif':
+                                        outputs = sim.controller_sim_pvif_slack(tdat, 6, L1, L2, A=None, B=None, gpscaler=gpscaler,alpha=cfgparams['alpha'])
+
+                                tdat['player_pos']=outputs['x'][:,:2]
+                                tdat['player_vel']=outputs['x'][:,2:]
 
                                 # Make time
                                 tmp = ut.make_timeline(outputs)
@@ -123,54 +144,82 @@ def simulate(cfgparams):
                                                                                                   randomize_weights=True,
                                                                                               ctrltype=modname, maxiter=3000,
                                                                                               tolerance=1e-5, optimizer='trust',
-                                                                                          slack_model=cfgparams['slack'])
+                                                                                          slack_model=cfgparams['slack'],bayes=False)
                                     runtime = time.time()-t1
 
                                 #Get parameters
                                 if opttype == 'first':
-                                    if cfgparams['slack'] is False:
-                                        weights = params[0]
-                                        width = params[1]
-                                        # transform paramteres to correct domain
-                                        L1_fit = np.array(jnp.log(1 + jnp.exp(params[2])))
-                                        L2_fit = np.array(jnp.log(1 + jnp.exp(params[3])))
-                                    elif cfgparams['slack'] is True:
+                                    weights = params[0]
+                                    width = params[1]
+                                    # transform paramteres to correct domain
+                                    L1_fit = np.array(jnp.log(1 + jnp.exp(params[2])))
+                                    L2_fit = np.array(jnp.log(1 + jnp.exp(params[3])))
+                                    if cfgparams['slack'] is True:
                                         alpha = params[4]
                                 elif opttype == 'second':
-                                    if cfgparams['slack'] is False:
-                                        weights = params[2]
-                                        width = params[3]
-                                        # transform paramteres to correct domain
-                                        L1_fit = np.array(params[0])
-                                        L2_fit = np.array(params[1])
-                                    elif cfgparams['slack'] is True:
+                                    weights = params[2]
+                                    width = params[3]
+                                    # transform paramteres to correct domain
+                                    L1_fit = np.array(params[0])
+                                    L2_fit = np.array(params[1])
+                                    if cfgparams['slack'] is True:
                                         alpha = params[4]
 
-                                wtsim = ut.generate_sim_switch(inputs, width, weights)
+                                wtsim = ut.generate_sim_switch(inputs, width, weights,slack_model=cfgparams['slack'])
 
                                 if cfgparams['slack'] is False:
                                     shift = np.vstack((wtsim[0], wtsim[1]))
                                 elif cfgparams['slack'] is True:
                                     shift = np.vstack((wtsim[0], wtsim[1], wtsim[2]))
 
+                            # Sim for results test
                                 # Sim for results test
                                 if cfgparams['slack'] is False:
                                     # Simulate data
                                     if modname == 'p':
-                                        output_pred = sim.controller_sim_p_post(tdat, shift, L1, L2, A=None, B=None)
-
+                                        output_pred = sim.controller_sim_p_post(tdat, shift, L1_fit, L2_fit, A=None,
+                                                                                B=None)
                                     elif modname == 'pv':
-                                        output_pred = sim.controller_sim_pv_post(tdat, shift, L1, L2, A=None, B=None)
+                                        output_pred = sim.controller_sim_pv_post(tdat, shift, L1_fit, L2_fit,
+                                                                                 A=None, B=None)
                                     elif modname == 'pf':
-                                        output_pred = sim.controller_sim_pf_post(tdat, shift, L1, L2, A=None, B=None)
+                                        output_pred = sim.controller_sim_pf_post(tdat, shift, L1_fit, L2_fit,
+                                                                                 A=None, B=None)
                                     elif modname == 'pvi':
-                                        output_pred = sim.controller_sim_pvi_post(tdat, shift, L1, L2, A=None, B=None)
+                                        output_pred = sim.controller_sim_pvi_post(tdat, shift, L1_fit, L2_fit,
+                                                                                  A=None, B=None)
                                     elif modname == 'pif':
-                                        output_pred = sim.controller_sim_pif_post(tdat, shift, L1, L2, A=None, B=None)
+                                        output_pred = sim.controller_sim_pif_post(tdat, shift, L1_fit, L2_fit,
+                                                                                  A=None, B=None)
                                     elif modname == 'pvf':
-                                        output_pred = sim.controller_sim_pvf_psot(tdat, shift, L1, L2, A=None, B=None)
+                                        output_pred = sim.controller_sim_pvf_post(tdat, shift, L1_fit, L2_fit,
+                                                                                  A=None, B=None)
                                     elif modname == 'pvif':
-                                        output_pred = sim.controller_sim_pvif_post(tdat, shift, L1, L2, A=None, B=None)
+                                        output_pred = sim.controller_sim_pvif_post(tdat, shift, L1_fit, L2_fit,
+                                                                                   A=None, B=None)
+                                elif cfgparams['slack'] is True:
+                                    # Simulate data
+                                    if modname == 'p':
+                                        output_pred = sim.controller_sim_p_slack_post(tdat, shift, L1_fit, L2_fit, A=None,
+                                                                                B=None,alpha=alpha)
+                                    elif modname == 'pv':
+                                        output_pred = sim.controller_sim_pv_slack_post(tdat, shift, L1_fit, L2_fit,
+                                                                                 A=None, B=None,alpha=alpha)
+                                    elif modname == 'pf':
+                                        output_pred = sim.controller_sim_pf_slack_post(tdat, shift, L1_fit, L2_fit,
+                                                                                 A=None, B=None,alpha=alpha)
+                                    elif modname == 'pvi':
+                                        output_pred = sim.controller_sim_pvi_slack_post(tdat, shift, L1_fit, L2_fit,
+                                                                                  A=None, B=None,alpha=alpha)
+                                    elif modname == 'pif':
+                                        output_pred = sim.controller_sim_pif_slack_post(tdat, shift, L1_fit, L2_fit,
+                                                                                  A=None, B=None,alpha=alpha)
+                                    elif modname == 'pvf':
+                                        output_pred = sim.controller_sim_pvf_slack_post(tdat, shift, L1_fit, L2_fit,
+                                                                                  A=None, B=None,alpha=alpha)
+                                    elif modname == 'pvif':
+                                        output_pred = sim.controller_sim_pvif_slack_post(tdat, shift, L1_fit, L2_fit,
+                                                                                   A=None, B=None,alpha=alpha)
 
                                 # compute metrics
                                 gainmse = np.power(np.concatenate((L1-L1_fit,L2-L2_fit)),2).mean()
@@ -179,24 +228,117 @@ def simulate(cfgparams):
                                 wtmse = np.power(wtsim-outputs['shift'],2).mean()
                                 wtcorr = np.corrcoef(np.array(wtsim).flatten(),outputs['shift'].flatten())[0,1]
 
-                                new_row = {
-                                    'model': modname,
-                                    'nrbf': num_rbfs,
-                                    'opttype': opttype,
-                                    'gpscaler': gpscaler,
-                                    'runidx': restart+1,
-                                    'gainmse': gainmse,
-                                    'tlength': outputs['x'].shape[0],
-                                    'runtime': runtime,
-                                    'posmse': posmse,
-                                    'poscorr': poscorr,
-                                    'wtcorr': wtcorr,
-                                    'wtmse': wtmse
-                                }
+
+                                if cfgparams['confusiontest'] is False:
+                                    new_row = {
+                                        'trial': trial,
+                                        'model': modname,
+                                        'nrbf': num_rbfs,
+                                        'opttype': opttype,
+                                        'gpscaler': gpscaler,
+                                        'runidx': restart+1,
+                                        'gainmse': gainmse,
+                                        'tlength': outputs['x'].shape[0],
+                                        'runtime': runtime,
+                                        'posmse': posmse,
+                                        'poscorr': poscorr,
+                                        'wtcorr': wtcorr,
+                                        'wtmse': wtmse
+                                    }
+                                elif cfgparams['confusiontest'] is True:
+                                    new_row = {
+                                        'trial': trial,
+                                        'model': modname,
+                                        'nrbf': num_rbfs,
+                                        'opttype': opttype,
+                                        'gpscaler': gpscaler,
+                                        'runidx': restart + 1,
+                                        'gainmse': gainmse,
+                                        'tlength': outputs['x'].shape[0],
+                                        'runtime': runtime,
+                                        f'posmse_{modname}': posmse,
+                                        f'poscorr_{modname}': poscorr,
+                                        f'wtcorr_{modname}': wtcorr,
+                                        f'wtmse_{modname}': wtmse,
+                                    }
+
+                                    new_row = confusion_test(new_row,inputs, tdat, outputs,cfgparams,modname, num_rbfs, opttype)
+
+
+
                                 results = pd.concat([results, pd.DataFrame([new_row])], ignore_index=True)
                                 results.to_csv(
-                                    '/Users/user/PycharmProjects/PacManMain/PacTimeOrig/controllers/results/maintest.csv')
+                                    '/Users/user/PycharmProjects/PacManMain/PacTimeOrig/controllers/results/maintest'+opttype+'.csv')
                                 pbar.update(1)
+
+
+def confusion_test(new_row,inputs, tdat, outputs,cfgparams,modname, num_rbfs, opttype):
+    filtered_models = [model for model in cfgparams['models'] if model != modname]
+    for model in filtered_models:
+        # choose loss
+        if cfgparams['slack'] is False:
+            loss_function = jm.create_loss_function_inner(ut.generate_rbf_basis, num_rbfs,
+                                                          ut.generate_smoothing_penalty, lambda_reg=0.1,
+                                                          ctrltype=model, opttype=opttype)
+        elif cfgparams['slack'] is True:
+            loss_function = jm.create_loss_function_inner_slack(ut.generate_rbf_basis, num_rbfs,
+                                                                ut.generate_smoothing_penalty, lambda_reg=0.1,
+                                                                ctrltype=model, opttype=opttype)
+
+        # only used for trust
+        grad_loss = ut.compute_loss_gradient(loss_function)
+        hess_loss = ut.compute_hessian(loss_function)
+
+        params, best_params_flat, best_loss = jm.outer_optimization_lbfgs(inputs, loss_function, grad_loss,
+                                                                          hess_loss,
+                                                                          randomize_weights=True,
+                                                                          ctrltype=model, maxiter=3000,
+                                                                          tolerance=1e-5, optimizer='trust',
+                                                                          slack_model=cfgparams['slack'])
+
+        if cfgparams['slack'] is False:
+            weights = params[2]
+            width = params[3]
+            # transform paramteres to correct domain
+            L1_fit = np.array(params[0])
+            L2_fit = np.array(params[1])
+        elif cfgparams['slack'] is True:
+            alpha = params[4]
+
+        wtsim = ut.generate_sim_switch(inputs, width, weights)
+
+        if cfgparams['slack'] is False:
+            shift = np.vstack((wtsim[0], wtsim[1]))
+        elif cfgparams['slack'] is True:
+            shift = np.vstack((wtsim[0], wtsim[1], wtsim[2]))
+
+        # Sim for results test
+        if cfgparams['slack'] is False:
+            # Simulate data
+            if model == 'p':
+                output_pred = sim.controller_sim_p_post(tdat, shift, L1_fit, L2_fit, A=None, B=None)
+            elif model == 'pv':
+                output_pred = sim.controller_sim_pv_post(tdat, shift, L1_fit, L2_fit, A=None, B=None)
+            elif model == 'pf':
+                output_pred = sim.controller_sim_pf_post(tdat, shift, L1_fit, L2_fit, A=None, B=None)
+            elif model == 'pvi':
+                output_pred = sim.controller_sim_pvi_post(tdat, shift, L1_fit, L2_fit, A=None, B=None)
+            elif model == 'pif':
+                output_pred = sim.controller_sim_pif_post(tdat, shift, L1_fit, L2_fit, A=None, B=None)
+            elif model == 'pvf':
+                output_pred = sim.controller_sim_pvf_post(tdat, shift, L1_fit, L2_fit, A=None, B=None)
+            elif model == 'pvif':
+                output_pred = sim.controller_sim_pvif_post(tdat, shift, L1_fit, L2_fit, A=None, B=None)
+
+        # compute metrics
+        poscorr = np.corrcoef(output_pred['x'][:, :2].flatten(), outputs['x'][:, :2].flatten())[0, 1]
+        wtcorr = np.corrcoef(np.array(wtsim).flatten(), outputs['shift'].flatten())[0, 1]
+
+        new_row[f'wtcorr_{model}'] = wtcorr
+        new_row[f'poscorr_{model}'] = poscorr
+    return new_row
+
+
 
 
 def process_simulation_task(args):
@@ -357,7 +499,7 @@ def simulate_mp(cfgparams):
     Xdsgn, kinematics, sessvars, psth = scripts.monkey_run(cfgparams)
   # Placeholder for input data; replace with your actual data
 
-    output_file = '/Users/user/PycharmProjects/PacManMain/PacTimeOrig/controllers/results/maintest.csv'  # Specify the output file path
+    output_file = '/Users/user/PycharmProjects/PacManMain/PacTimeOrig/controllers/results/maintest'+cfgparams['opttype']+'.csv'  # Specify the output file path
 
     # Check if the results file exists; if not, create it with a header
     if not os.path.exists(output_file):
@@ -377,7 +519,7 @@ def simulate_mp(cfgparams):
                             tasks.append((opttype, modname, num_rbfs, gpscaler, trial, restart, cfgparams, Xdsgn))
 
     # Parallel execution
-    with mp.Pool(processes=mp.cpu_count()) as pool:
+    with mp.Pool(processes=4) as pool:
         with tqdm(total=len(tasks)) as pbar:
             for result in pool.imap_unordered(process_simulation_task, tasks):
                 # Write each result immediately to the CSV file

@@ -59,15 +59,22 @@ def computederivatives(positions, vartodiff=['selfXpos','selfYpos','prey1Xpos','
     # Get the column names and loop over for flexibility. No hardcoding, youNeWbiE!
     col_names = positions[0].columns.values.tolist()
     n_trials = len(positions)
-
+    # if scaling is None:
+    #     scaling = [1,1]
     for trial in range(n_trials):
         tmppos = positions[trial]
         # loop over variable columns
         for _,colname in enumerate(vartodiff):
             tmpdat = np.array(tmppos[colname])
+            # if 'xpos' in colname.lower():
+            #     scaleidx = 0
+            # elif 'ypos' in colname.lower():
+            #     scaleidx = 1
+
             if smooth is True:
-                tmpvel = sgolay(np.gradient(np.array(tmpdat)) * 1 / dt,21,1)
-                tmpaccel = sgolay(np.gradient(tmpvel) * 1 / dt,21,1)
+
+                tmpvel = sgolay(np.gradient(np.array(tmpdat)) * 1 / dt,11,1)
+                tmpaccel = sgolay(np.gradient(tmpvel) * (1 / dt),11,1)
             else:
                 tmpvel = np.gradient(np.array(tmpdat)) * 1/dt
                 tmpaccel = np.gradient(tmpvel) * 1/dt
