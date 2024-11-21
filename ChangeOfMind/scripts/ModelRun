@@ -1,2 +1,2 @@
-export PYTHONPATH=/Users/user/PyCharmProjects/PacManMain
-python ModelFitting.py --config /Users/user/PycharmProjects/PacManMain/ChangeOfMind/config/modelfit.yaml --mode main1
+$env:PYTHONPATH="C:\PacManMain"
+python C:/PacManMain/ChangeOfMind/scripts/ModelFitting.py --config /PacManMain/ChangeOfMind/config/modelfitpersess.yaml --mode main2

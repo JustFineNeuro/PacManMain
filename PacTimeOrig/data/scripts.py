@@ -15,7 +15,10 @@ from PacTimeOrig.controllers import utils as ut
 
 def monkey_run(cfgparams):
     # load datafile
-    datafile = dh.dataloader(sess=cfgparams['session'], region=cfgparams['area'], subj=cfgparams['subj'],suffix='Pac_' + cfgparams['area'] + '.mat')
+    if "data_path" in cfgparams:
+        datafile = dh.dataloader(folder=cfgparams['data_path'], sess=cfgparams['session'], region=cfgparams['area'], subj=cfgparams['subj'],suffix='Pac_' + cfgparams['area'] + '.mat')
+    else:
+        datafile = dh.dataloader(sess=cfgparams['session'], region=cfgparams['area'], subj=cfgparams['subj'],suffix='Pac_' + cfgparams['area'] + '.mat')
 
     # Get session variables
     sessvars = dh.getvars(datafile)
@@ -30,8 +33,8 @@ def monkey_run(cfgparams):
     kinematics = dp.computederivatives(positions,
                                        vartodiff=['selfXpos', 'selfYpos', 'prey1Xpos', 'prey1Ypos', 'prey2Xpos',
                                                   'prey2Ypos'], dt=1.0 / 60.0,smooth=True)
-    # sessvars = dp.get_reaction_time(sessvars,kinematics)
-    sessvars = dh.get_matlab_wt_reaction_time(sessvars, session=cfgparams['session'], subj=cfgparams['subj'])
+    sessvars = dp.get_reaction_time(sessvars,kinematics)
+    # sessvars = dh.get_matlab_wt_reaction_time(sessvars, session=cfgparams['session'], subj=cfgparams['subj'])
     # Select 2 prey trials
     ogsessvars = sessvars
     kinematics, sessvars = dh.subselect(kinematics, sessvars, trialtype='2')

@@ -232,6 +232,138 @@ def mainnhp(config_path):
             with open(fname, 'wb') as f:
                 pickle.dump(results_save, f, protocol=pickle.HIGHEST_PROTOCOL)
 
+def mainnhp_persess(config_path):
+    # Load config yaml file %OK
+    config = load_config(config_path)
+    cfgparams = config['cfgparams']
+    subj = cfgparams['subj']
+    sess = cfgparams['session']
+
+    results_save={}
+
+
+    # get monkey data
+    Xdsgn, kinematics, sessvars, psth = scripts.monkey_run(cfgparams)
+
+    # Get system parameters
+    A, B = ut.define_system_parameters()
+
+    #Loop over trials
+    for trial in tqdm(range(len(Xdsgn))):
+        # results_save['sess_' + str(sess)]['trial_' + str(trial)]={}
+        results_save['trial_' + str(trial)]={}
+
+        results = {}
+
+        # Loop over model
+        for modidx, modname in enumerate(cfgparams['models']):
+
+            tmpresults={}
+            # loop over nrbfs
+            for num_rbfs in cfgparams['rbfs']:
+
+                #repeat process n times
+                for repeat in range(cfgparams['restarts']):
+
+                    tdat = ut.get_data_for_fit(Xdsgn, trial)
+
+                    tdat['x'] = np.hstack((tdat['player_pos'], tdat['player_vel']))
+
+                    # Make time
+                    tmp = ut.make_timeline(tdat)
+
+                    # Prep inputs
+                    inputs = ut.prepare_inputs(A, B, tdat['x'], tdat['uout'], tdat['pry1_pos'],
+                                               tdat['pry2_pos'], tmp, num_rbfs,
+                                               tdat['x'][:, 2:], tdat['pry1_vel'], tdat['pry2_vel'],
+                                               pry_1_accel=tdat['pry1_accel'],
+                                               pry_2_accel=tdat['pry2_accel'])
+
+                    params, params_flat,best_loss, prior_hessian, cov_matrix, controller_trajectories, elbo\
+                        =run_fit(inputs, cfgparams, modname, modidx, num_rbfs)
+
+                    weights = params[2]
+                    width = np.log(1+np.exp(params[3]))
+
+
+                    wtsim = ut.generate_sim_switch(inputs,weights=weights,widths=width)
+                    map_trajectory= np.vstack((wtsim[0], wtsim[1]))
+                    # Store the results indexed by (num_rbfs, repeat)
+                    tmpresults[(num_rbfs, repeat)] = {
+                        'params': params,
+                        'params_flat': params_flat,
+                        'best_loss': best_loss,
+                        'prior_hessian': prior_hessian,
+                        'cov_matrix': cov_matrix,
+                        'elbo': elbo,
+                        'map_trajectory': map_trajectory,
+                        'controller_trajectories': controller_trajectories
+                    }
+
+                # choose best of run per nrbf
+                minlossbykey = get_dict_loss(tmpresults)
+                if len(cfgparams['rbfs'])==1:
+                    results[modname] = tmpresults[minlossbykey[list(minlossbykey.keys())[0]]['key']]
+                else:
+                    # choose 1 with highest elbo
+                    elb=[]
+                    hdimu=[]
+                    for num_rbfs in cfgparams['rbfs']:
+                        elb.append(tmpresults[minlossbykey[num_rbfs]['key']]['elbo'])
+                        a=jm.compute_hdi(tmpresults[minlossbykey[num_rbfs]['key']]['controller_trajectories'][:, 0, :],
+                                      0.95)[1]
+                        b = jm.compute_hdi(tmpresults[minlossbykey[num_rbfs]['key']]['controller_trajectories'][:, 0, :],
+                                          0.95)[0]
+                        hdimu.append(np.sum(a-b))
+
+                    if cfgparams['uncertain_tiebreak'] is True:
+                        selected = np.argmax(jm.compute_model_probabilities(elbos=[elb[0]-hdimu[0],elb[1]-hdimu[1]]))
+                    else:
+                        selected = np.argmax(elb)
+
+                    results[modname]=tmpresults[minlossbykey[cfgparams['rbfs'][selected]]['key']]
+
+        # MODEL SELECTION AND AVERAGING ##
+        # save best in loss and best in elbo and BMA (re
+        elb = []
+        losses = []
+        for key in results.keys():
+            elb.append(results[key]['elbo'])
+            losses.append(results[key]['best_loss'])
+
+        to_save_best=results[cfgparams['models'][np.argmax(np.array(elb))]]
+        to_save_best['name'] = cfgparams['models'][np.argmax(np.array(elb))]
+        # results_save['sess_' + str(sess)]['trial_' + str(trial)]['best_elbo'] = to_save_best
+        results_save['trial_' + str(trial)]['best_elbo'] = to_save_best
+
+        to_save_best = results[cfgparams['models'][np.argmin(np.array(losses))]]
+        to_save_best['name'] = cfgparams['models'][np.argmin(np.array(losses))]
+        # results_save['sess_' + str(sess)]['trial_' + str(trial)]['best_loss'] = to_save_best
+        results_save['trial_' + str(trial)]['best_loss'] = to_save_best
+
+        #1. get model weights from elbos
+        modprob = jm.compute_model_probabilities(np.array(elb))
+        bma_traj=np.zeros_like(results[list(results.keys())[0]]['controller_trajectories'][:,0,:])
+        for iter,key in enumerate(results.keys()):
+            bma_traj += modprob[iter]*results[key]['controller_trajectories'][:, 0, :]
+
+        bma = np.stack((bma_traj, 1-bma_traj), axis=1)
+        # results_save['sess_' + str(sess)]['trial_' + str(trial)]['bma']=bma
+
+        results_save['trial_' + str(trial)]['bma']={}
+        results_save['trial_' + str(trial)]['bma']['map'] = bma.mean(axis=0)
+        results_save['trial_' + str(trial)]['bma']['hdi_high'] = jm.compute_hdi(bma[:,0,:])
+        results_save['trial_' + str(trial)]['bma']['hdi_low'] = jm.compute_hdi(bma[:,1,:])
+
+    #Pickle data per session
+    fname=config['results_path']+subj+'_'+str(sess)+'_wt.pkl'
+
+    with open(fname, 'wb') as f:
+        pickle.dump(results_save, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+
+
 
 if __name__ == "__main__":
     # Parse command-line arguments
@@ -255,6 +387,8 @@ if __name__ == "__main__":
     if args.mode == "main1":
         mainnhp(args.config)
     elif args.mode == "main2":
+        mainnhp_persess(args.config)
+    elif args.mode == "main3":
         NotImplemented
         # mainemu(args.config)
 
