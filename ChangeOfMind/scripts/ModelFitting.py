@@ -239,8 +239,6 @@ def mainnhp_persess(config_path):
     subj = cfgparams['subj']
     sess = cfgparams['session']
 
-    results_save={}
-
 
     # get monkey data
     Xdsgn, kinematics, sessvars, psth = scripts.monkey_run(cfgparams)
@@ -249,9 +247,12 @@ def mainnhp_persess(config_path):
     A, B = ut.define_system_parameters()
 
     #Loop over trials
-    for trial in tqdm(range(len(Xdsgn))):
+    # if 'check if finished?'
+    #     else:
+    trialsloop=len(Xdsgn)
+    for trial in tqdm(range(trialsloop)):
         # results_save['sess_' + str(sess)]['trial_' + str(trial)]={}
-        results_save['trial_' + str(trial)]={}
+        results_save={}
 
         results = {}
 
@@ -333,13 +334,13 @@ def mainnhp_persess(config_path):
 
         to_save_best=results[cfgparams['models'][np.argmax(np.array(elb))]]
         to_save_best['name'] = cfgparams['models'][np.argmax(np.array(elb))]
-        # results_save['sess_' + str(sess)]['trial_' + str(trial)]['best_elbo'] = to_save_best
-        results_save['trial_' + str(trial)]['best_elbo'] = to_save_best
+        # results_save['trial_' + str(trial)]['best_elbo'] = to_save_best
+        results_save['best_elbo'] = to_save_best
 
         to_save_best = results[cfgparams['models'][np.argmin(np.array(losses))]]
         to_save_best['name'] = cfgparams['models'][np.argmin(np.array(losses))]
-        # results_save['sess_' + str(sess)]['trial_' + str(trial)]['best_loss'] = to_save_best
-        results_save['trial_' + str(trial)]['best_loss'] = to_save_best
+        # results_save['trial_' + str(trial)]['best_loss'] = to_save_best
+        results_save['best_loss'] = to_save_best
 
         #1. get model weights from elbos
         modprob = jm.compute_model_probabilities(np.array(elb))
@@ -350,16 +351,19 @@ def mainnhp_persess(config_path):
         bma = np.stack((bma_traj, 1-bma_traj), axis=1)
         # results_save['sess_' + str(sess)]['trial_' + str(trial)]['bma']=bma
 
-        results_save['trial_' + str(trial)]['bma']={}
-        results_save['trial_' + str(trial)]['bma']['map'] = bma.mean(axis=0)
-        results_save['trial_' + str(trial)]['bma']['hdi_high'] = jm.compute_hdi(bma[:,0,:])
-        results_save['trial_' + str(trial)]['bma']['hdi_low'] = jm.compute_hdi(bma[:,1,:])
+        # results_save['trial_' + str(trial)]['bma']={}
+        # results_save['trial_' + str(trial)]['bma']['map'] = bma.mean(axis=0)
+        # results_save['trial_' + str(trial)]['bma']['hdi_high'] = jm.compute_hdi(bma[:,0,:])
+        # results_save['trial_' + str(trial)]['bma']['hdi_low'] = jm.compute_hdi(bma[:,1,:])
+        results_save['bma'] = {}
+        results_save['map'] = bma.mean(axis=0)
+        results_save['bma']['hdi_high'] = jm.compute_hdi(bma[:, 0, :])
+        results_save['bma']['hdi_low'] = jm.compute_hdi(bma[:, 1, :])
+        #Pickle data per session
+        fname=config['results_path']+subj+'_'+str(sess)+'_'+str(trial+1)+'_wt.pkl'
 
-    #Pickle data per session
-    fname=config['results_path']+subj+'_'+str(sess)+'_wt.pkl'
-
-    with open(fname, 'wb') as f:
-        pickle.dump(results_save, f, protocol=pickle.HIGHEST_PROTOCOL)
+        with open(fname, 'wb') as f:
+            pickle.dump(results_save, f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 
