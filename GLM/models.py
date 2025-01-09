@@ -24,6 +24,11 @@ def prs_double_penalty(basis_x_list, S_list, y=None, fit_intercept=True, cauchy=
     """
     num_vars = len(basis_x_list)
     beta_list = []
+    cap_min=10e-6
+    cap_max=10e2
+
+    #Estimate sigma
+    sigma = numpyro.sample("sigma", dist.HalfCauchy(1.0))
 
     if fit_intercept:
         intercept = numpyro.sample("intercept", dist.Normal(0, 10))
@@ -32,6 +37,24 @@ def prs_double_penalty(basis_x_list, S_list, y=None, fit_intercept=True, cauchy=
         basis_x = basis_x_list[i]
         S = S_list[i]
         n_basis = basis_x.shape[1]
+        # Step 1: Add Jitter
+        S_jittered = S + jitter * jnp.eye(S.shape[0])
+
+        # Step 2: Eigen-decomposition
+        eigenvalues, eigenvectors = jnp.linalg.eigh(S_jittered)
+
+        # Step 3: Apply Log Transform to Eigenvalues
+        eigenvalues_log = jnp.log1p(eigenvalues)  # Log-transform to reduce disparity
+
+        # Step 4: Cap Small and Large Eigenvalues
+        eigenvalues_capped = jnp.clip(eigenvalues_log, cap_min, cap_max)
+
+        # Step 5: Normalize Eigenvalues
+        eigenvalues_normalized = eigenvalues_capped / jnp.max(eigenvalues_capped)
+
+        # Step 6: Reconstruct the Stabilized Penalty Matrix
+        S_stabilized = eigenvectors @ jnp.diag(eigenvalues_normalized) @ eigenvectors.T
+        S=S_stabilized
 
         # Perform eigen-decomposition to identify the null space
         eigenvalues, eigenvectors = linalg.eigh(S)
@@ -49,7 +72,7 @@ def prs_double_penalty(basis_x_list, S_list, y=None, fit_intercept=True, cauchy=
         lambda_j = numpyro.sample(f"lambda_j_{i}", dist.HalfCauchy(cauchy))
 
         # Additional shrinkage parameter for double penalty
-        lambda_star = numpyro.sample(f"lambda_star_{i}", dist.HalfCauchy(2.0*cauchy))
+        lambda_star = numpyro.sample(f"lambda_star_{i}", dist.HalfCauchy(cauchy))
 
         # Combine S and S_star with jitter for numerical stability
         S_jittered = lambda_j * S + lambda_star * S_star + jnp.eye(S.shape[0]) * jitter
@@ -356,21 +379,21 @@ def gaussian_prior(basis_x, y=None, fit_intercept=True, prior_scale=0.01):
     numpyro.sample("y", dist.Poisson(rate=jnp.exp(linear_pred)), obs=y)
 
 
-def laplace_prior(basis_x, y=None, fit_intercept=True, prior_scale=0.01):
-    if isinstance(basis_x, list):
-        basis_x = basis_x[0]
+def laplace_prior(basis_x_list, y=None, fit_intercept=True, prior_scale=0.01):
+    if isinstance(basis_x_list, list):
+        basis_x_list = basis_x_list[0]
 
     if fit_intercept:
         # Sample the intercept term separately with a non-regularized prior
         intercept = numpyro.sample("intercept", dist.Normal(0, 10))
 
     # Sample coefficients for other predictors with Laplace prior
-    coefs = numpyro.sample("coefs", dist.Laplace(0, prior_scale).expand([basis_x.shape[1]]))
+    coefs = numpyro.sample("coefs", dist.Laplace(0, prior_scale).expand([basis_x_list.shape[1]]))
     # Linear predictor using intercept and other coefficients
     if fit_intercept:
-        linear_pred = intercept + jnp.dot(basis_x, coefs)
+        linear_pred = intercept + jnp.dot(basis_x_list, coefs)
     else:
-        linear_pred = jnp.dot(basis_x, coefs)
+        linear_pred = jnp.dot(basis_x_list, coefs)
     # Poisson likelihood
     numpyro.sample("y", dist.Poisson(rate=jnp.exp(linear_pred)), obs=y)
 

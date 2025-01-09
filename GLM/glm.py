@@ -1,6 +1,7 @@
 import pandas as pd
 import arviz as az
 import flax.linen as flax_nn
+from functools import partial
 from jax import nn
 import numpyro
 import numpyro.distributions as dist
@@ -19,15 +20,17 @@ from GLM.utils import PatsyTransformer, calculate_aic_bic_poisson
 from GLM import models as mods
 from sklearn.metrics import mean_poisson_deviance
 from sklearn.pipeline import make_pipeline, Pipeline
-from sklearn.linear_model import PoissonRegressor
+from sklearn.linear_model import PoissonRegressor,LogisticRegression
 from sklearn.model_selection import TimeSeriesSplit, train_test_split, cross_val_score, GridSearchCV
 
 
-# TODO: port compute tuningcurve for empirical comparison
 # TODO: Out fo sample testing on models using X_test and y_test + setting distinct subsets of data without breaiking temporality
 # TOdo: confidence bounds on predicitons might need to refit the model with statsmodels or bootstrap the standard error
 # TODO circular shift
 # TODO: stimulis history coding
+
+
+
 
 class PoissonGLM:
     def __init__(self):
@@ -192,6 +195,168 @@ class PoissonGLM:
         self.predicted_y = np.exp(linear_predictor)  # Poisson GLM applies exponential to linear predictor
 
 
+class LogisticGLM:
+    def __init__(self):
+        '''
+        Logistic regression class for generalized linear models.
+        '''
+        self.fit_params = None
+        self.test_size = None
+        self.scores = None
+        self.formulas = None
+        self.pipeline = None
+        self.X = None
+        self.y = None
+
+    def add_data(self, X=None, y=None):
+        '''
+        Add data before splitting
+        '''
+        self.X = X
+        self.y = y
+        return self
+
+    def split_test(self, test_size=0.2):
+        '''
+        Split data into training and test sets
+        '''
+        self.test_size = test_size
+        self.X, self.X_test, self.y, self.y_test = train_test_split(self.X, self.y, test_size=test_size,
+                                                                    random_state=42)
+        return self
+
+    def make_preprocessor(self, formulas=None, metric='cv', l1reg=0.0001, solver='liblinear'):
+        '''
+        Set up the preprocessing pipeline.
+
+        :param formulas: model formulas in patsy format
+        :param metric: 'cv' or 'score'
+        :param l1reg: L1 regularization strength
+        :param solver: Optimization solver
+        '''
+        self.formulas = formulas
+        if isinstance(formulas, list):
+            if metric == 'cv':
+                self.pipeline = Pipeline([
+                    ('patsy', PatsyTransformer(formula=formulas[0])),  # Placeholder formula
+                    ('model', LogisticRegression(penalty='l1', C=1 / l1reg, solver=solver))
+                ])
+            elif metric == 'score':
+                pipelines = []
+                for formula in formulas:
+                    pipelines.append(Pipeline([
+                        ('patsy', PatsyTransformer(formula=formula)),  # Placeholder formula
+                        ('model', LogisticRegression(penalty='l1', C=1 / l1reg, solver=solver))
+                    ]))
+                self.pipeline = pipelines
+        elif isinstance(formulas, str):
+            self.pipeline = Pipeline([
+                ('patsy', PatsyTransformer(formula=formulas)),  # Placeholder formula
+                ('model', LogisticRegression(penalty='l1', C=1 / l1reg, solver=solver))
+            ])
+        return self
+
+    def fit(self, params={'cv': 5, 'shuffleTime': True}):
+        '''
+        Fit logistic regression models for all formulas provided.
+        '''
+        self.fit_params = params
+
+        if isinstance(self.formulas, list):
+            # For multiple formulas, store pipelines and scores
+            self.pipeline = []  # Reset pipelines
+            self.scores = pd.DataFrame(columns=['formula', 'accuracy'])
+
+            for formula in self.formulas:
+                # Create a separate pipeline for each formula
+                pipeline = Pipeline([
+                    ('patsy', PatsyTransformer(formula=formula)),
+                    ('model', LogisticRegression(penalty='l1', C=1 / 0.1, solver='liblinear'))
+                ])
+                self.pipeline.append(pipeline)
+
+                # Fit the model
+                pipeline.fit(self.X, self.y)
+
+                # Compute test accuracy
+                transformer = pipeline.named_steps['patsy']
+                model = pipeline.named_steps['model']
+                X_test_transformed = transformer.transform(self.X_test)
+                y_pred = model.predict(X_test_transformed)
+                accuracy = np.mean(y_pred == self.y_test)
+
+                # Store results
+                self.scores = self.scores.append({'formula': formula, 'accuracy': accuracy}, ignore_index=True)
+
+        elif isinstance(self.formulas, str):
+            # Single formula case
+            self.pipeline = Pipeline([
+                ('patsy', PatsyTransformer(formula=self.formulas)),
+                ('model', LogisticRegression(penalty='l1', C=1 / 0.1, solver='liblinear'))
+            ])
+            self.pipeline.fit(self.X, self.y)
+
+            # Compute test accuracy
+            transformer = self.pipeline.named_steps['patsy']
+            model = self.pipeline.named_steps['model']
+            X_test_transformed = transformer.transform(self.X_test)
+            y_pred = model.predict(X_test_transformed)
+            accuracy = np.mean(y_pred == self.y_test)
+            self.scores = pd.DataFrame([{'formula': self.formulas, 'accuracy': accuracy}])
+
+        else:
+            raise ValueError("Formulas must be a string or a list of strings.")
+
+        # Display predictive accuracies
+        print(self.scores)
+
+        return self
+    def compute_accuracy(self):
+        '''
+        Compute predictive accuracy for each fitted model on the test set.
+        '''
+        if isinstance(self.pipeline, list):
+            # If multiple pipelines are used (formulas list)
+            accuracies = []
+            for pipeline in self.pipeline:
+                # Transform test data using the current pipeline
+                transformer = pipeline.named_steps['patsy']
+                model = pipeline.named_steps['model']
+                X_test_transformed = transformer.transform(self.X_test)
+                y_pred = model.predict(X_test_transformed)
+
+                # Compute accuracy
+                accuracy = np.mean(y_pred == self.y_test)
+                accuracies.append((transformer.formula, accuracy))
+
+            # Print accuracies for each model
+            for formula, acc in accuracies:
+                print(f"Model: {formula}, Predictive Accuracy: {acc * 100:.2f}%")
+            return accuracies
+
+        elif hasattr(self, 'best_pipeline'):
+            # For single model case
+            transformer = self.best_pipeline.named_steps['patsy']
+            model = self.best_pipeline.named_steps['model']
+            X_test_transformed = transformer.transform(self.X_test)
+            y_pred = model.predict(X_test_transformed)
+            accuracy = np.mean(y_pred == self.y_test)
+            print(f"Predictive Accuracy: {accuracy * 100:.2f}%")
+            return [(transformer.formula, accuracy)]
+
+        else:
+            raise ValueError("No pipelines are available for accuracy computation.")
+    def predict(self, pred_data, predict_params={'data': 'X', 'whichmodel': 'best'}):
+        '''
+        Predict probabilities or classes using the fitted model.
+        '''
+        design_matrix = self.best_pipeline[:-1].transform(pred_data)
+        model = self.best_pipeline.named_steps['model']
+        self.predicted_probabilities = model.predict_proba(design_matrix)
+        self.predicted_classes = model.predict(design_matrix)
+        return self.predicted_probabilities, self.predicted_classes
+
+
 class PoissonGLMbayes:
 
     def __init__(self):
@@ -200,6 +365,7 @@ class PoissonGLMbayes:
         :param spl_df: List indexing continuous variables and indexing number of spline bases to use
         :param spl_order: List indexing continuous variables and indexing order of spline bases to use
         '''
+        self.point_log_likelihood = {}
         self.mcmc_result = None
         self.svi_result = None
         self.model = None
@@ -287,6 +453,9 @@ class PoissonGLMbayes:
                     self.guide = AutoMultivariateNormal(self.model)
                 elif params['guide'] == 'lap':
                     self.guide = AutoLaplaceApproximation(self.model)
+                elif params['guide'] == 'delta':
+                    self.guide = AutoDelta(self.model)
+
 
                 # Choose learning type and parameterization
                 if 'lrate' not in params:
@@ -312,6 +481,7 @@ class PoissonGLMbayes:
                                           S_list=self.S_list, y=self.y,
                                           tensor_basis_list=self.tensor_basis_list, S_tensor_list=self.S_tensor_list,
                                           cat_basis=self.cat_basis_list, jitter=1e-6, **kwargs)
+                self.svi=svi
             self.fit_params = params
 
         return self
@@ -374,6 +544,101 @@ class PoissonGLMbayes:
             self.coef_keep[keys] = np.logical_xor(self.posterior_ci_lower[keys]>0, self.posterior_ci_upper[keys]<0).astype(int)
 
         return self
+
+    def pointwise_log_likelihood(self,exclude_keys,name='full'):
+        pointwise_log_likelihood = []
+
+        basiskeys = [key for key in self.posterior_samples if key.startswith('beta_beta_')]
+        tensorkeys = [key for key in self.posterior_samples if key.startswith('beta_tensor_')]
+        interceptkeys = [key for key in self.posterior_samples if key.startswith('intercept')]
+
+        # Identify keys to exclude (modify this based on the variable you want to remove)
+
+        for i in range(self.npostsamples):
+
+            # Initialize linear predictors for full and reduced models
+            linear_pred = 0
+
+            # Basis functions
+            for ii, key in enumerate(basiskeys):
+                term = jnp.dot(self.posterior_samples[key][i], self.basis_x_list[ii].transpose())
+
+                # Add to reduced predictor only if not excluded
+                if key not in exclude_keys:
+                    linear_pred+= term
+
+            # Tensor basis functions
+            for ii, key in enumerate(tensorkeys):
+                term = jnp.dot(self.posterior_samples[key][i], self.tensor_basis_list[ii].transpose())
+
+                # Add to  predictor only if not excluded
+                if key not in exclude_keys:
+                    linear_pred += term
+
+            # Intercept
+            for ii, key in enumerate(interceptkeys):
+                term = self.posterior_samples[key][i]
+
+                # Add to both predictors
+                linear_pred+= term
+
+            # Calculate log-likelihood for each model
+            log_likelihood_full = dist.Poisson(rate=jnp.exp(linear_pred)).log_prob(self.y)
+
+            # Store pointwise log-likelihood
+            pointwise_log_likelihood.append(log_likelihood_full)
+
+        # Convert to arrays
+        pointwise_log_likelihood = jnp.array(pointwise_log_likelihood)[None, :, :]  # Add chain dimension
+        if hasattr(self, 'point_log_likelihood'):
+            self.point_log_likelihood[name] = pointwise_log_likelihood
+        else:
+            self.point_log_likelihood={}
+            self.point_log_likelihood[name] = pointwise_log_likelihood
+
+    def compute_idata(self,isbaseline=False):
+        if isbaseline is False:
+            pointwise_log_likelihood = []
+            basiskeys = [key for key in self.posterior_samples if key.startswith('beta_beta_')]
+            tensorkeys = [key for key in self.posterior_samples if key.startswith('beta_tensor_')]
+            interceptkeys = [key for key in self.posterior_samples if key.startswith('intercept')]
+
+            for i in range(self.npostsamples):
+
+                for ii, key in enumerate(basiskeys):
+                    if ii == 0:
+                        linear_pred = jnp.dot(self.posterior_samples[key][i], self.basis_x_list[ii].transpose())
+                    else:
+                        linear_pred += jnp.dot(self.posterior_samples[key][i], self.basis_x_list[ii].transpose())
+
+                for ii, key in enumerate(tensorkeys):
+                    linear_pred += jnp.dot(self.posterior_samples[key][i], self.tensor_basis_list[ii].transpose())
+
+                for ii, key in enumerate(interceptkeys):
+                    linear_pred += self.posterior_samples[key][i]
+
+                # Calculate log-likelihood for each data point under a Poisson likelihood
+                log_likelihood = dist.Poisson(rate=jnp.exp(linear_pred)).log_prob(self.y)
+                pointwise_log_likelihood.append(log_likelihood)
+
+            pointwise_log_likelihood = jnp.array(pointwise_log_likelihood)
+
+            # # Convert pointwise log-likelihood to ArviZ's InferenceData format
+            # Since it's vi expand dimension to emulate a chain
+            pointwise_log_likelihood = pointwise_log_likelihood[None, :, :]
+            idata1 = az.from_dict(log_likelihood={"log_likelihood": pointwise_log_likelihood})
+        else:
+            ylen = self.y.shape[0]
+            pointwise_log_likelihood = []
+            for i in range(self.npostsamples):
+                linear_pred = jnp.exp(jnp.repeat(self.posterior_noise_samples['intercept'][i], ylen))
+                log_likelihood = dist.Poisson(rate=linear_pred).log_prob(self.y)
+                pointwise_log_likelihood.append(log_likelihood)
+
+            pointwise_log_likelihood = jnp.array(pointwise_log_likelihood)
+            pointwise_log_likelihood = pointwise_log_likelihood[None, :, :]
+            idata1 = az.from_dict(log_likelihood={"log_likelihood": pointwise_log_likelihood})
+        return idata1
 
 
     def model_metrics(self, metric='WAIC',getbaselinemetric=True):
@@ -439,6 +704,7 @@ class PoissonGLMbayes:
             pointwise_log_likelihood = jnp.array(pointwise_log_likelihood)
             pointwise_log_likelihood = pointwise_log_likelihood[None, :, :]
             idata2 = az.from_dict(log_likelihood={"log_likelihood": pointwise_log_likelihood})
+
             self.noise_waic = az.waic(idata2, pointwise=True)
 
         self.comparison = az.compare({'model1': idata1, 'baseline': idata2}, ic="waic")
@@ -455,3 +721,10 @@ class PoissonGLMbayes:
         '''
             predict at specific levels to make estimated curves to comapre against empirical
         '''
+
+
+
+def log_likelihood_scorer(estimator, X, y):
+    probs = estimator.predict_proba(X)
+    log_likelihood = np.sum(y * np.log(probs[:, 1]) + (1 - y) * np.log(probs[:, 0]))
+    return log_likelihood
