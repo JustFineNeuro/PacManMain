@@ -25,10 +25,13 @@ def monkey_run(cfgparams):
 
     # Get position data
     positions = dh.retrievepositions(datafile,dattype='nhp', rescale=cfgparams['scaling'])
-    if cfgparams['area'] == 'pMD':
+    if cfgparams['subj']=='H':
+        if cfgparams['area'] == 'pMD':
+            psth = dh.get_psth(datafile, win_shift=30)
+        else:
+            psth = dh.get_psth(datafile, win_shift=75)
+    elif cfgparams['subj']=='K':
         psth = dh.get_psth(datafile, win_shift=30)
-    else:
-        psth = dh.get_psth(datafile, win_shift=75)
 
     kinematics = dp.computederivatives(positions,
                                        vartodiff=['selfXpos', 'selfYpos', 'prey1Xpos', 'prey1Ypos', 'prey2Xpos',
@@ -37,8 +40,8 @@ def monkey_run(cfgparams):
     # sessvars = dh.get_matlab_wt_reaction_time(sessvars, session=cfgparams['session'], subj=cfgparams['subj'])
     # Select 2 prey trials
     ogsessvars = sessvars
-    kinematics, sessvars = dh.subselect(kinematics, sessvars, trialtype='2')
-    psth, _ = dh.subselect(psth, ogsessvars, trialtype='2')
+    kinematics, sessvars = dh.subselect(kinematics, sessvars, trialtype=cfgparams['trialtype'])
+    psth, _ = dh.subselect(psth, ogsessvars, trialtype=cfgparams['trialtype'])
     # Drop columns
     kinematics = dh.dropcols(kinematics, columns_to_drop=['predXpos', 'predYpos'])
 
@@ -51,23 +54,26 @@ def monkey_run(cfgparams):
     # psth = [pd.DataFrame(x) for x in psth]
     psth = dh.cut_to_rt(psth, sessvars)
     kinematics = dh.get_time_vector(kinematics)
-    kinematics = dp.compute_distance(kinematics, trialtype=2)
+    kinematics = dp.compute_distance(kinematics, trialtype=int(cfgparams['trialtype']))
     # compute relative normalized speed
-    kinematics = dp.compute_relspeed(kinematics, trialtype=2)
+    kinematics = dp.compute_relspeed(kinematics, trialtype=int(cfgparams['trialtype']))
     kinematics = dp.compute_selfspeed(kinematics)
 
     # For each kinematics frame, add relative reward value
     Xdsgn = kinematics
     for trial in range(len(Xdsgn)):
         Xdsgn[trial]['val1'] = np.repeat(sessvars.iloc[trial].NPCvalA, len(kinematics[trial]))
-        Xdsgn[trial]['val2'] = np.repeat(sessvars.iloc[trial].NPCvalB, len(kinematics[trial]))
+        if cfgparams['trialtype']=='2':
+            Xdsgn[trial]['val2'] = np.repeat(sessvars.iloc[trial].NPCvalB, len(kinematics[trial]))
 
     # Switch reward positions so highest value is always in prey 1 slot
-    Xdsgn = dh.rewardalign(Xdsgn)
+    if cfgparams['trialtype'] == '2':
+        Xdsgn = dh.rewardalign(Xdsgn)
     Xdsgn = [df[sorted(df.columns)] for df in Xdsgn]
 
     # Compute relative value
-    Xdsgn = [df.assign(relvalue=df['val1'] - df['val2']).round(2) for df in Xdsgn]
+    if cfgparams['trialtype'] == '2':
+        Xdsgn = [df.assign(relvalue=df['val1'] - df['val2']).round(2) for df in Xdsgn]
 
     return Xdsgn, kinematics, sessvars, psth
 
@@ -77,6 +83,8 @@ def human_emu_run(cfgparams):
     # Dataloader, + #sessvar maker,
     sessvars, neural = dh.dataloader_EMU(folder=cfgparams['folder'], subj=cfgparams['subj'])
 
+    #correct bad trial idx
+    sessvars.loc[np.where(sessvars.trialidx == 0.0)[0], 'trialidx'] = 100.0
     dataall = neural['neuronData']
 
     # position getter and scaler (all alignedf already to chase_start)
@@ -88,36 +96,49 @@ def human_emu_run(cfgparams):
                                                   'prey2Ypos'], dt=1.0 / 60.0, smooth=True)
 
     # get psth
-    psth = dh.get_psth_EMU(dataall)
+    psth,areas = dh.get_psth_EMU(dataall)
 
-    # subselect 2 prey trials
+    # subselect N prey trials
     ogsessvars = sessvars
-    kinematics, sessvars = dh.subselect(kinematics, sessvars, trialtype='2')
-    psth, _ = dh.subselect(psth, ogsessvars, trialtype='2')
+    kinematics, sessvars = dh.subselect(kinematics, sessvars, trialtype=cfgparams['trialtype'])
+    psth, _ = dh.subselect(psth, ogsessvars, trialtype=cfgparams['trialtype'])
 
     # Rt compute and cut data
     sessvars = dp.get_reaction_time(sessvars, kinematics)
     kinematics = dh.cut_to_rt(kinematics, sessvars)
     psth = dh.cut_to_rt(psth, sessvars)
     kinematics = dh.get_time_vector(kinematics)
-    kinematics = dp.compute_distance(kinematics, trialtype=2)
+    kinematics = dp.compute_distance(kinematics, trialtype=int(cfgparams['trialtype']))
     # compute relative normalized speed
-    kinematics = dp.compute_relspeed(kinematics, trialtype=2)
+    kinematics = dp.compute_relspeed(kinematics, trialtype=int(cfgparams['trialtype']))
     kinematics = dp.compute_selfspeed(kinematics)
+
+    # This is EMU specific to clearing up bad trials
+    lengths = np.array([len(df) for df in kinematics])
+
+    rmtrial=np.sort(np.concatenate([np.where(sessvars.paused>0)[0],np.where(lengths<10)[0]]))
+    sessvars = sessvars.drop(rmtrial)
+
+    kinematics = [kinematics[i] for i in range(len(kinematics)) if i not in rmtrial]
+    psth = [psth[i] for i in range(len(psth)) if i not in rmtrial]
 
     # For each kinematics frame, add relative reward value
     Xdsgn = kinematics
     for trial in range(len(Xdsgn)):
         Xdsgn[trial]['val1'] = np.repeat(sessvars.iloc[trial].NPCvalA, len(kinematics[trial]))
-        Xdsgn[trial]['val2'] = np.repeat(sessvars.iloc[trial].NPCvalB, len(kinematics[trial]))
+
+        if cfgparams['trialtype']=='2': #add both for 2 prey trials
+            Xdsgn[trial]['val2'] = np.repeat(sessvars.iloc[trial].NPCvalB, len(kinematics[trial]))
 
     # Switch reward positions so highest value is always in prey 1 slot
-    Xdsgn = dh.rewardalign(Xdsgn)
+    if cfgparams['trialtype'] == '2':  # add both for 2 prey trials
+        Xdsgn = dh.rewardalign(Xdsgn)
     Xdsgn = [df[sorted(df.columns)] for df in Xdsgn]
 
     # Compute relative value
-    Xdsgn = [df.assign(relvalue=df['val1'] - df['val2']).round(2) for df in Xdsgn]
+    if cfgparams['trialtype'] == '2':  # add both for 2 prey trials
+        Xdsgn = [df.assign(relvalue=df['val1'] - df['val2']).round(2) for df in Xdsgn]
 
-    return Xdsgn, kinematics, sessvars, psth
+    return Xdsgn, kinematics, sessvars, psth,areas
 
 

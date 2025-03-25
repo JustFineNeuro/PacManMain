@@ -3,7 +3,6 @@ import scipy as sp
 import pandas as pd
 import jax
 import jax.numpy as jnp
-from jax import jit, grad
 from jax import grad, jacfwd, jacrev
 from PacTimeOrig.data import DataHandling as dh
 from PacTimeOrig.data import DataProcessing as dp
@@ -56,18 +55,23 @@ def generate_sim_gains(ngain):
     return L1, L2
 
 
-def define_system_parameters(dt=1.0 / 60.0):
+def define_system_parameters(dt=1.0 / 60.0,decay_term=None):
     '''
+    State transition matrix A and control matrix B for position and velocity
 
     :param ctrltype: p = position error only, pv = positon + velocity error, pvi= positon + velocity + integral(poserror) control
     :return:
     '''
-
-    # State transition matrix A and control matrix B for position and velocity
-    A = np.array([[1, 0, dt, 0],
-                  [0, 1, 0, dt],
-                  [0, 0, 1, 0],
-                  [0, 0, 0, 1]])
+    if decay_term is None:
+        A = np.array([[1, 0, dt, 0],
+                      [0, 1, 0, dt],
+                      [0, 0, 1, 0],
+                      [0, 0, 0, 1]])
+    elif decay_term is not None:
+        A = np.array([[1, 0, dt, 0],
+                      [0, 1, 0, dt],
+                      [0, 0, 1-dt*decay_term, 0],
+                      [0, 0, 0, 1-dt*decay_term]])
 
     B = np.array([[0, 0],
                   [0, 0],

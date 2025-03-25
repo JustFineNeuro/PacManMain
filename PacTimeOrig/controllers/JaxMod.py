@@ -612,7 +612,7 @@ def create_loss_function_inner_slack(generate_rbf_basis, num_rbfs, generate_smoo
 
 
 def create_loss_function_inner_bayes(generate_rbf_basis, num_rbfs, generate_smoothing_penalty, lambda_reg,
-                                     ctrltype='pv',
+                                     ctrltype,
                                       use_gmf_prior=False,
                                      prior_std={'weights': 10, 'widths': 2, 'gains': 5}):
     @jit
@@ -627,15 +627,15 @@ def create_loss_function_inner_bayes(generate_rbf_basis, num_rbfs, generate_smoo
         # Converting adam and lbfgs to generic loss call:
         gainsize = {
             'p': 1,
-            'pv': 2, 'pf': 2,
+            'pv': 2, 'pf': 2, 'pi':2,
             'pvi': 3, 'pif': 3, 'pvf': 3,
             'pvif': 4,
         }.get(ctrltype, 1)
 
         # Split the flat parameter vector into components
-        weights = params[:num_rbfs]  # Shape: (num_rbfs, )
+        weights = params[:num_rbfs]  # Shape: (num_rbfs, ) Mixture weights guesses
         widths_uncon = params[num_rbfs]
-        #Softplus transform
+        #Softplus transform for positive
         widths = jnp.log(1+jnp.exp(widths_uncon))
 
         # Get gain parameters
@@ -755,6 +755,371 @@ def create_loss_function_inner_bayes(generate_rbf_basis, num_rbfs, generate_smoo
                 return x, u_out
 
             x, u_out = jax.lax.fori_loop(0, N, loop_body, (x, u_out))
+        elif ctrltype == 'pi':
+            def loop_body(k, val):
+                x, u_out, int_e_pos_1, int_e_pos_2 = val
+
+                e_pos_1 = x[k, :2] - SetpointA_pos[k]
+
+                e_pos_2 = x[k, :2] - SetpointB_pos[k]
+
+                ## CLAMPING
+                # Update integral of position error
+                int_e_pos_1 = jnp.clip(int_e_pos_1 + e_pos_1 * dt, -10.0, 10.0)
+                int_e_pos_2 = jnp.clip(int_e_pos_2 + e_pos_2 * dt, -10.0, 10.0)
+
+                e1 = jnp.vstack((e_pos_1,  int_e_pos_1))
+                e2 = jnp.vstack((e_pos_2,  int_e_pos_2))
+                # Compute control inputs using the estimated gains
+                u1 = -L1 @ e1
+                u2 = -L2 @ e2
+
+                # Convex combOOOOO
+
+                u = w1[k] * u1 + w2[k] * u2
+
+                x_next = A @ x[k] + B @ u
+                x = x.at[k + 1].set(x_next)
+                u_out = u_out.at[k].set(u)
+                return x, u_out, int_e_pos_1, int_e_pos_2
+
+            x, u_out, _, _ = jax.lax.fori_loop(0, N, loop_body, (x, u_out, int_e_pos_1, int_e_pos_2))
+        elif ctrltype == 'pvi':
+            def loop_body(k, val):
+                x, u_out, int_e_pos_1, int_e_pos_2 = val
+
+                e_pos_1 = x[k, :2] - SetpointA_pos[k]
+                e_vel_1 = x[k, 2:] - SetpointA_vel[k]
+
+                e_pos_2 = x[k, :2] - SetpointB_pos[k]
+                e_vel_2 = x[k, 2:] - SetpointB_vel[k]
+
+                ## CLAMPING
+                # Update integral of position error
+                int_e_pos_1 = jnp.clip(int_e_pos_1 + e_pos_1 * dt, -10.0, 10.0)
+                int_e_pos_2 = jnp.clip(int_e_pos_2 + e_pos_2 * dt, -10.0, 10.0)
+
+                e1 = jnp.vstack((e_pos_1, e_vel_1, int_e_pos_1))
+                e2 = jnp.vstack((e_pos_2, e_vel_2, int_e_pos_2))
+
+                # Compute control inputs using the estimated gains
+                u1 = -L1 @ e1
+                u2 = -L2 @ e2
+
+                # Convex combOOOOO
+
+                u = w1[k] * u1 + w2[k] * u2
+
+                x_next = A @ x[k] + B @ u
+                x = x.at[k + 1].set(x_next)
+                u_out = u_out.at[k].set(u)
+                return x, u_out, int_e_pos_1, int_e_pos_2
+
+            x, u_out, _, _ = jax.lax.fori_loop(0, N, loop_body, (x, u_out, int_e_pos_1, int_e_pos_2))
+        elif ctrltype == 'pif':
+            def loop_body(k, val):
+                x, u_out, int_e_pos_1, int_e_pos_2 = val
+
+                e_pos_1 = x[k, :2] - SetpointA_pos[k]
+
+                e_pos_2 = x[k, :2] - SetpointB_pos[k]
+
+                ## CLAMPING
+                # Update integral of position error
+                int_e_pos_1 = jnp.clip(int_e_pos_1 + e_pos_1 * dt, -10.0, 10.0)
+                int_e_pos_2 = jnp.clip(int_e_pos_2 + e_pos_2 * dt, -10.0, 10.0)
+
+                e_pred_1 = x[k, :2] - (SetpointA_pos[k] + SetpointA_vel[k] * dt + 0.5 * SetpointA_accel[k] * dt ** 2)
+                e_pred_2 = x[k, :2] - (SetpointB_pos[k] + SetpointB_vel[k] * dt + 0.5 * SetpointB_accel[k] * dt ** 2)
+
+                e1 = jnp.vstack((e_pos_1, int_e_pos_1, e_pred_1))
+                e2 = jnp.vstack((e_pos_2, int_e_pos_2, e_pred_2))
+
+                # Compute control inputs using the estimated gains
+                u1 = -L1 @ e1
+                u2 = -L2 @ e2
+
+                # Convex combOOOOO
+
+                u = w1[k] * u1 + w2[k] * u2
+
+                x_next = A @ x[k] + B @ u
+                x = x.at[k + 1].set(x_next)
+                u_out = u_out.at[k].set(u)
+                return x, u_out, int_e_pos_1, int_e_pos_2
+
+            x, u_out, _, _ = jax.lax.fori_loop(0, N, loop_body, (x, u_out, int_e_pos_1, int_e_pos_2))
+        elif ctrltype == 'pvf':
+            def loop_body(k, val):
+                x, u_out = val
+
+                e_pos_1 = x[k, :2] - SetpointA_pos[k]
+                e_vel_1 = x[k, 2:] - SetpointA_vel[k]
+
+                e_pos_2 = x[k, :2] - SetpointB_pos[k]
+                e_vel_2 = x[k, 2:] - SetpointB_vel[k]
+
+                e_pred_1 = x[k, :2] - (SetpointA_pos[k] + SetpointA_vel[k] * dt + 0.5 * SetpointA_accel[k] * dt ** 2)
+                e_pred_2 = x[k, :2] - (SetpointB_pos[k] + SetpointB_vel[k] * dt + 0.5 * SetpointB_accel[k] * dt ** 2)
+
+                e1 = jnp.vstack((e_pos_1, e_vel_1, e_pred_1))
+                e2 = jnp.vstack((e_pos_2, e_vel_2, e_pred_2))
+
+                # Compute control inputs using the estimated gains
+                u1 = -L1 @ e1
+                u2 = -L2 @ e2
+
+                # Convex combOOOOO
+
+                u = w1[k] * u1 + w2[k] * u2
+
+                x_next = A @ x[k] + B @ u
+                x = x.at[k + 1].set(x_next)
+                u_out = u_out.at[k].set(u)
+                return x, u_out
+
+            x, u_out = jax.lax.fori_loop(0, N, loop_body, (x, u_out))
+        elif ctrltype == 'pvif':
+            def loop_body(k, val):
+                x, u_out, int_e_pos_1, int_e_pos_2 = val
+
+                e_pos_1 = x[k, :2] - SetpointA_pos[k]
+                e_vel_1 = x[k, 2:] - SetpointA_vel[k]
+
+                e_pos_2 = x[k, :2] - SetpointB_pos[k]
+                e_vel_2 = x[k, 2:] - SetpointB_vel[k]
+
+                ## CLAMPING
+                # Update integral of position error
+                int_e_pos_1 = jnp.clip(int_e_pos_1 + e_pos_1 * dt, -10.0, 10.0)
+                int_e_pos_2 = jnp.clip(int_e_pos_2 + e_pos_2 * dt, -10.0, 10.0)
+
+                e_pred_1 = x[k, :2] - (SetpointA_pos[k] + SetpointA_vel[k] * dt + 0.5 * SetpointA_accel[k] * dt ** 2)
+                e_pred_2 = x[k, :2] - (SetpointB_pos[k] + SetpointB_vel[k] * dt + 0.5 * SetpointB_accel[k] * dt ** 2)
+
+                e1 = jnp.vstack((e_pos_1, e_vel_1, int_e_pos_1, e_pred_1))
+                e2 = jnp.vstack((e_pos_2, e_vel_2, int_e_pos_2, e_pred_2))
+
+                # Compute control inputs using the estimated gains
+                u1 = -L1 @ e1
+                u2 = -L2 @ e2
+
+                # Convex combOOOOO
+
+                u = w1[k] * u1 + w2[k] * u2
+
+                x_next = A @ x[k] + B @ u
+                x = x.at[k + 1].set(x_next)
+                u_out = u_out.at[k].set(u)
+                return x, u_out, int_e_pos_1, int_e_pos_2
+
+            x, u_out, _, _ = jax.lax.fori_loop(0, N, loop_body, (x, u_out, int_e_pos_1, int_e_pos_2))
+
+        # Negative log-likelihood
+        residuals = u_out - u_obs
+        log_likelihood = -0.5 * jnp.log(2 * jnp.pi) - 0.5 * jnp.sum(residuals ** 2)
+
+        # Regularization term using GMF prior
+        if use_gmf_prior:
+            S_x = generate_smoothing_penalty(num_rbfs)
+            gmf_prior = -0.5 * (weights @ S_x @ weights.T)
+        else:
+            gmf_prior = 0.0
+
+        # Combine log-likelihood and priors
+        prior_weights = -0.5 * jnp.sum((weights / prior_std['weights']) ** 2)*0.0 #This is not a smoothing penality, its a size penalty
+        prior_widths = -0.5 * jnp.sum((widths / prior_std['widths']) ** 2)
+        prior_gains = -0.5 * (jnp.sum((L1 / prior_std['gains']) ** 2) + jnp.sum((L2 / prior_std['gains']) ** 2))
+
+        loss = -log_likelihood - lambda_reg * gmf_prior - 0*prior_weights - prior_widths - prior_gains
+        return loss
+
+    return loss_function
+
+
+def create_loss_function_inner_bayes_emu(generate_rbf_basis, num_rbfs, generate_smoothing_penalty, lambda_reg,
+                                     ctrltype,
+                                      use_gmf_prior=False,
+                                     prior_std={'weights': 10, 'widths': 2, 'gains': 5}):
+    @jit
+    def loss_function(params, inputs):
+        """
+        Computes the negative log-likelihood.
+
+        params: Tuple containing (weights, widths, L1_flat, L2_flat)
+        inputs: Dictionary containing necessary inputs
+        """
+
+        # Converting adam and lbfgs to generic loss call:
+        gainsize = {
+            'p': 1,
+            'pv': 2, 'pf': 2, 'pi':2,
+            'pvi': 3, 'pif': 3, 'pvf': 3,
+            'pvif': 4,
+        }.get(ctrltype, 1)
+
+        # Split the flat parameter vector into components
+        weights = params[:num_rbfs]  # Shape: (num_rbfs, )
+        widths_uncon = params[num_rbfs]
+        #Softplus transform
+        widths = jnp.log(1+jnp.exp(widths_uncon))
+
+        # Get gain parameters
+        L1 = params[num_rbfs + 1:num_rbfs + (gainsize + 1)]
+        L2 = params[(num_rbfs + (gainsize + 1)):num_rbfs + (2 * gainsize + 1)]
+        # Apply Softplus to ensure positivity with 1st order gradient optimizer
+        L1 = jnp.log(1 + jnp.exp(L1))  # Softplus transformation
+        L2 = jnp.log(1 + jnp.exp(L2))  # Softplus transformation
+
+        K = jnp.log(1+jnp.exp(params[-1]))
+
+
+        # weights, widths, L1, L2 = params
+        x0 = inputs['x0']  # Initial state (position and velocity)
+        SetpointA_pos = inputs['SetpointA_pos']
+        SetpointA_vel = inputs['SetpointA_vel']
+        SetpointA_accel = inputs['SetpointA_accel']
+        SetpointB_pos = inputs['SetpointB_pos']
+        SetpointB_vel = inputs['SetpointB_vel']
+        SetpointB_accel = inputs['SetpointB_accel']
+
+        u_obs = inputs['u_obs']
+        tmp = inputs['tmp']
+        centers = inputs['centers']
+        # A = inputs['A']
+        dt=1.0/60.0
+
+        A = jnp.array([[1, 0, dt, 0],
+                      [0, 1, 0, dt],
+                      [0, 0, 1 - dt * K, 0],
+                      [0, 0, 0, 1 - dt * K]])
+
+
+        B = inputs['B']
+        dt = inputs['dt']
+
+        N = SetpointA_pos.shape[0]
+
+        # Generate RBF basis functions using precomputed centers
+        X = generate_rbf_basis(tmp, centers, widths)
+        tmpkernel = jnp.dot(X, weights)
+        w1 = jax.nn.sigmoid(tmpkernel)
+        w2 = 1 - w1
+        w_probabilities = jax.nn.softmax(tmpkernel, axis=-1)
+
+        # Initialize state and control outputs
+        x = jnp.zeros((N + 1, A.shape[1]))
+        x = x.at[0].set(x0)
+        u_out = jnp.zeros((N, B.shape[1]))
+        # Initialize integrator variables
+        int_e_pos_1 = jnp.zeros(2)
+        int_e_pos_2 = jnp.zeros(2)
+        if ctrltype == 'p':
+            def loop_body(k, val):
+                x, u_out = val
+
+                e_pos_1 = x[k, :2] - SetpointA_pos[k]
+                e_pos_2 = x[k, :2] - SetpointB_pos[k]
+
+                e1 = jnp.vstack((e_pos_1))
+                e2 = jnp.vstack((e_pos_2))
+
+                # Compute control inputs using the estimated gains
+                u1 = -L1 * e1
+                u2 = -L2 * e2
+
+                u = w1[k] * u1 + w2[k] * u2
+
+                x_next = A @ x[k] + (B @ u).flatten()
+                x = x.at[k + 1].set(x_next)
+                u_out = u_out.at[k].set(u.flatten())
+                return x, u_out
+
+            x, u_out = jax.lax.fori_loop(0, N, loop_body, (x, u_out))
+        if ctrltype == 'pv':
+            def loop_body(k, val):
+                x, u_out = val
+
+                e_pos_1 = x[k, :2] - SetpointA_pos[k]
+                e_vel_1 = x[k, 2:] - SetpointA_vel[k]
+
+                e_pos_2 = x[k, :2] - SetpointB_pos[k]
+                e_vel_2 = x[k, 2:] - SetpointB_vel[k]
+
+                e1 = jnp.vstack((e_pos_1, e_vel_1))
+                e2 = jnp.vstack((e_pos_2, e_vel_2))
+
+                # Compute control inputs using the estimated gains
+                u1 = -L1 @ e1
+                u2 = -L2 @ e2
+                u = w1[k] * u1 + w2[k] * u2
+
+                # Update state
+                x_next = A @ x[k] + B @ u
+                x = x.at[k + 1].set(x_next)
+                u_out = u_out.at[k].set(u)
+                return x, u_out
+
+            x, u_out = jax.lax.fori_loop(0, N, loop_body, (x, u_out))
+        elif ctrltype == 'pf':
+            def loop_body(k, val):
+                x, u_out = val
+
+                e_pos_1 = x[k, :2] - SetpointA_pos[k]
+
+                e_pos_2 = x[k, :2] - SetpointB_pos[k]
+
+                ## CLAMPING
+
+                e_pred_1 = x[k, :2] - (SetpointA_pos[k] + SetpointA_vel[k] * dt + 0.5 * SetpointA_accel[k] * dt ** 2)
+                e_pred_2 = x[k, :2] - (SetpointB_pos[k] + SetpointB_vel[k] * dt + 0.5 * SetpointB_accel[k] * dt ** 2)
+
+                e1 = jnp.vstack((e_pos_1, e_pred_1))
+                e2 = jnp.vstack((e_pos_2, e_pred_2))
+
+                # Compute control inputs using the estimated gains
+                u1 = -L1 @ e1
+                u2 = -L2 @ e2
+
+                # Convex combOOOOO
+
+                u = w1[k] * u1 + w2[k] * u2
+
+                x_next = A @ x[k] + B @ u
+                x = x.at[k + 1].set(x_next)
+                u_out = u_out.at[k].set(u)
+                return x, u_out
+
+            x, u_out = jax.lax.fori_loop(0, N, loop_body, (x, u_out))
+        elif ctrltype == 'pi':
+            def loop_body(k, val):
+                x, u_out, int_e_pos_1, int_e_pos_2 = val
+
+                e_pos_1 = x[k, :2] - SetpointA_pos[k]
+
+                e_pos_2 = x[k, :2] - SetpointB_pos[k]
+
+                ## CLAMPING
+                # Update integral of position error
+                int_e_pos_1 = jnp.clip(int_e_pos_1 + e_pos_1 * dt, -10.0, 10.0)
+                int_e_pos_2 = jnp.clip(int_e_pos_2 + e_pos_2 * dt, -10.0, 10.0)
+
+                e1 = jnp.vstack((e_pos_1,  int_e_pos_1))
+                e2 = jnp.vstack((e_pos_2,  int_e_pos_2))
+                # Compute control inputs using the estimated gains
+                u1 = -L1 @ e1
+                u2 = -L2 @ e2
+
+                # Convex combOOOOO
+
+                u = w1[k] * u1 + w2[k] * u2
+
+                x_next = A @ x[k] + B @ u
+                x = x.at[k + 1].set(x_next)
+                u_out = u_out.at[k].set(u)
+                return x, u_out, int_e_pos_1, int_e_pos_2
+
+            x, u_out, _, _ = jax.lax.fori_loop(0, N, loop_body, (x, u_out, int_e_pos_1, int_e_pos_2))
         elif ctrltype == 'pvi':
             def loop_body(k, val):
                 x, u_out, int_e_pos_1, int_e_pos_2 = val
@@ -901,11 +1266,13 @@ def create_loss_function_inner_bayes(generate_rbf_basis, num_rbfs, generate_smoo
         prior_weights = -0.5 * jnp.sum((weights / prior_std['weights']) ** 2)*0.0
         prior_widths = -0.5 * jnp.sum((widths / prior_std['widths']) ** 2)
         prior_gains = -0.5 * (jnp.sum((L1 / prior_std['gains']) ** 2) + jnp.sum((L2 / prior_std['gains']) ** 2))
+        prior_K = -0.5 * jnp.sum((K / prior_std['K']) ** 2)
 
-        loss = -log_likelihood - lambda_reg * gmf_prior - 0*prior_weights - prior_widths - prior_gains
+        loss = -log_likelihood - lambda_reg * gmf_prior - 0*prior_weights - prior_widths - prior_gains-prior_K
         return loss
 
     return loss_function
+
 
 
 
@@ -972,7 +1339,7 @@ def stability_constraints(params_flat, inputs, gainsize, multip, epsilon=1e-3):
     return np.array([constraint1, constraint2])
 
 
-def outer_optimization_lbfgs(inputs, loss_function, grad_loss, hessian_loss=None, ctrltype='pvi',
+def outer_optimization_lbfgs(inputs, loss_function, grad_loss, hessian_loss=None, ctrltype=None,
                              randomize_weights=True, maxiter=10000, tolerance=1e-6, optimizer='trust',
                              slack_model=False, bayes=True):
     """
@@ -987,10 +1354,12 @@ def outer_optimization_lbfgs(inputs, loss_function, grad_loss, hessian_loss=None
     # Converting adam and lbfgs to generic loss call:
     gainsize = {
         'p': 1,
-        'pv': 2, 'pf': 2,
+        'pv': 2, 'pf': 2,'pi': 2,
         'pvi': 3, 'pif': 3, 'pvf': 3,
         'pvif': 4,
     }.get(ctrltype, 1)
+
+
 
     # Initial guess
     if randomize_weights is True:
@@ -1175,9 +1544,7 @@ def compute_model_probabilities(elbos):
     return probs / np.sum(probs)
 
 
-
-
-def outer_likelihood_loss(generate_rbf_basis,ctrltype, num_rbfs):
+def outer_likelihood_loss(generate_rbf_basis, ctrltype, num_rbfs):
     @jit
     def likelihood_loss_function(params, inputs):
         """
@@ -1190,7 +1557,7 @@ def outer_likelihood_loss(generate_rbf_basis,ctrltype, num_rbfs):
         # Converting adam and lbfgs to generic loss call:
         gainsize = {
             'p': 1,
-            'pv': 2, 'pf': 2,
+            'pv': 2, 'pf': 2,'pi':2,
             'pvi': 3, 'pif': 3, 'pvf': 3,
             'pvif': 4,
         }.get(ctrltype, 1)
@@ -1320,6 +1687,36 @@ def outer_likelihood_loss(generate_rbf_basis,ctrltype, num_rbfs):
                 return x, u_out
 
             x, u_out = jax.lax.fori_loop(0, N, loop_body, (x, u_out))
+        elif ctrltype == 'pi':
+            def loop_body(k, val):
+                x, u_out, int_e_pos_1, int_e_pos_2 = val
+
+                e_pos_1 = x[k, :2] - SetpointA_pos[k]
+
+                e_pos_2 = x[k, :2] - SetpointB_pos[k]
+
+                ## CLAMPING
+                # Update integral of position error
+                int_e_pos_1 = jnp.clip(int_e_pos_1 + e_pos_1 * dt, -10.0, 10.0)
+                int_e_pos_2 = jnp.clip(int_e_pos_2 + e_pos_2 * dt, -10.0, 10.0)
+
+                e1 = jnp.vstack((e_pos_1,  int_e_pos_1))
+                e2 = jnp.vstack((e_pos_2,  int_e_pos_2))
+
+                # Compute control inputs using the estimated gains
+                u1 = -L1 @ e1
+                u2 = -L2 @ e2
+
+                # Convex combOOOOO
+
+                u = w1[k] * u1 + w2[k] * u2
+
+                x_next = A @ x[k] + B @ u
+                x = x.at[k + 1].set(x_next)
+                u_out = u_out.at[k].set(u)
+                return x, u_out, int_e_pos_1, int_e_pos_2
+
+            x, u_out, _, _ = jax.lax.fori_loop(0, N, loop_body, (x, u_out, int_e_pos_1, int_e_pos_2))
         elif ctrltype == 'pvi':
             def loop_body(k, val):
                 x, u_out, int_e_pos_1, int_e_pos_2 = val
@@ -1488,7 +1885,7 @@ def compute_elbo(prior_std, params_map, posterior_cov, inputs, ctrltype, num_sam
     iterate=1
     for sample in samples:
         # Negative log-likelihood (data term)
-        jit_loss_fn = outer_likelihood_loss(generate_rbf_basis=ut.generate_rbf_basis, ctrltype="pv",
+        jit_loss_fn = outer_likelihood_loss(generate_rbf_basis=ut.generate_rbf_basis, ctrltype=ctrltype,
                                                num_rbfs=num_rbfs)
         neg_log_likelihood = jit_loss_fn(params_map, inputs)
         # Prior terms
@@ -1601,7 +1998,7 @@ def compute_posterior_covariance(hessian_loss, params_flat, inputs,prior_hessian
 def initialize_parameters(inputs, ctrltype='pvi', randomize_weights=True, slack_model=False):
     gainsize = {
         'p': 1,
-        'pv': 2, 'pf': 2,
+        'pv': 2, 'pf': 2,'pi':2,
         'pvi': 3, 'pif': 3, 'pvf': 3,
         'pvif': 4,
     }.get(ctrltype, 1)
@@ -1671,7 +2068,7 @@ def setup_optimizer(params, optimizer='adam', learning_rate=1e-3, slack_model=Fa
 def optimization_step(params, opt_state, optimizer, loss_function, inputs, ctrltype='p', slack_model=True):
     gainsize = {
         'p': 1,
-        'pv': 2, 'pf': 2,
+        'pv': 2, 'pf': 2,'pi':2,
         'pvi': 3, 'pif': 3, 'pvf': 3,
         'pvif': 4,
     }.get(ctrltype, 1)

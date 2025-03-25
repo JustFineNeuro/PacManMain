@@ -3,7 +3,7 @@ import numpy as np
 from sklearn.base import BaseEstimator, TransformerMixin
 from patsy import dmatrices, build_design_matrices
 from scipy.linalg import hankel
-
+import re
 
 class PatsyTransformer(BaseEstimator, TransformerMixin):
     def __init__(self, formula):
@@ -55,6 +55,38 @@ def smoothing_penalty_matrix(basis_x1, basis_x2=None, is_tensor=False):
         S_x = [np.kron(D_x1.T @ D_x1, np.eye(basis_x2.shape[1])) + np.kron(np.eye(basis_x1.shape[1]), D_x2.T @ D_x2)]
 
     return S_x
+
+def smoothing_penalty_matrix_sklearn(nbase1=None, nbase2=None, is_tensor=False):
+    if is_tensor is False:
+        D_x = np.diff(np.eye(nbase1), n=2, axis=0)
+        S_x = D_x.T @ D_x
+    elif is_tensor is True:
+        D_x1 = np.diff(np.eye(nbase1), n=2, axis=0)
+        D_x2 = np.diff(np.eye(nbase2), n=2, axis=0)
+        S_x = np.kron(D_x1.T @ D_x1, np.eye(nbase2)) + np.kron(np.eye(nbase1), D_x2.T @ D_x2)
+    return S_x
+
+def extract_variable_names_from_formula(formula):
+    """
+    Extracts the variable names and the number of basis functions (df)
+    from a Patsy formula string.
+
+    Example:
+        formula = "y ~ cr(speed, df=12) + cr(reldist, df=8)"
+        Output: {'speed': 12, 'reldist': 8}
+    """
+    term_sizes = {}
+
+    # Regular expression to match 'cr(variable, df=N)'
+    spline_pattern = re.compile(r'cr\((\w+),\s*df\s*=\s*(\d+)\)')
+
+    # Find all matches in the formula
+    matches = spline_pattern.findall(formula)
+
+    for var_name, df in matches:
+        term_sizes[var_name] = int(df)  # Convert df to integer
+
+    return term_sizes
 
 # def stimdelayhistory()
 #     paddedStim = np.hstack((np.zeros(ntfilt-1), Stim))   # pad early bins of stimulus with zero

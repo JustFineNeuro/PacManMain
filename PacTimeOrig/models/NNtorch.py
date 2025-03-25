@@ -57,6 +57,103 @@ class Mod3(nn.Module):
         return x
 
 
+class ContinuousRNN_basic(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size, dt=0.01, nonlinearity=torch.tanh):
+        super(ContinuousRNN_basic, self).__init__()
+        self.hidden_size = hidden_size
+        self.dt = dt
+        self.nonlinearity = nonlinearity
+
+        # Parameters
+        self.W_h = nn.Parameter(torch.randn(hidden_size, hidden_size) * 0.1)
+        self.W_x = nn.Parameter(torch.randn(hidden_size, input_size) * 0.1)
+        self.b = nn.Parameter(torch.zeros(hidden_size))
+        self.W_out = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x, h):
+        # Compute continuous-time update: dh = -h + tanh(W_h h + W_x x + b)
+        dh = -h + self.nonlinearity(torch.matmul(h, self.W_h.T) + torch.matmul(x, self.W_x.T) + self.b)
+        h = h + self.dt * dh  # Euler update
+        y = self.W_out(h)  # Output layer
+        return y, h
+
+
+class ContinuousRNNWithBasis(nn.Module):
+    ''' use basis input layer to learn more complex feature'''
+    def __init__(self, input_size, basis_size, hidden_size, output_size, dt=0.01, nonlinearity=torch.tanh):
+        super(ContinuousRNNWithBasis, self).__init__()
+        self.hidden_size = hidden_size
+        self.dt = dt
+        self.nonlinearity = nonlinearity
+
+        # Basis function layer
+        self.basis = nn.Linear(input_size, basis_size)
+
+        # Parameters for the RNN
+        self.W_h = nn.Parameter(torch.randn(hidden_size, hidden_size) * 0.1)
+        self.W_x = nn.Parameter(torch.randn(hidden_size, basis_size) * 0.1)
+        self.b = nn.Parameter(torch.zeros(hidden_size))
+        self.W_out = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x, h):
+        # Transform inputs using basis function
+        x_transformed = torch.relu(self.basis(x))
+
+        # Compute continuous-time update: dh = -h + tanh(W_h h + W_x x_transformed + b)
+        dh = -h + self.nonlinearity(torch.matmul(h, self.W_h.T) + torch.matmul(x_transformed, self.W_x.T) + self.b)
+        h = h + self.dt * dh  # Euler update
+        y = self.W_out(h)  # Output layer
+        return y, h
+
+
+
+
+class RNN_decoder(nn.Module):
+    def __init__(self, input_size=12, hidden_size=128, output_size=2, use_softmax=True, rnn_type="GRU"):
+        super(RNN_decoder, self).__init__()
+
+        # Initialize RNN layer based on type
+        if rnn_type == "GRU":
+            self.rnn = nn.GRU(input_size=input_size, hidden_size=hidden_size, batch_first=True)
+        elif rnn_type == "LSTM":
+            self.rnn = nn.LSTM(input_size=input_size, hidden_size=hidden_size, batch_first=True)
+        elif rnn_type == "simpleRNN":
+            self.rnn = nn.RNN(input_size=input_size, hidden_size=hidden_size, batch_first=True, nonlinearity="tanh")
+        else:
+            raise ValueError("rnn_type must be either 'GRU' or 'LSTM'")
+
+        self.linear = nn.Linear(hidden_size, output_size)
+        self.use_softmax = use_softmax
+        self.softmax = nn.Softmax(dim=-1) if use_softmax else None
+
+    #     # Apply custom initialization
+    #     self.reset_parameters()
+    #
+    # def reset_parameters(self):
+    #     # Initialize weights and biases of the linear layer
+    #     torch.nn.init.xavier_uniform_(self.linear.weight)
+    #     torch.nn.init.zeros_(self.linear.bias)
+
+    def forward(self, x, seq_lengths):
+        # Pack padded sequence
+        x = pack_padded_sequence(x, seq_lengths, batch_first=True, enforce_sorted=False)
+
+        # Apply RNN
+        x, _ = self.rnn(x)
+
+        # Unpack sequence
+        x, _ = pad_packed_sequence(x, batch_first=True)
+
+        # Apply linear layer
+        x = self.linear(x)
+
+        # Optionally apply softmax
+        if self.use_softmax:
+            x = self.softmax(x)
+
+        return x
+
+
 # CONTINUOUS TIME RNN
 class CTRNN(nn.Module):
     """Continuous-time RNN.
@@ -508,3 +605,46 @@ class TwoAreaRNNNetController(nn.Module):
         hidden_states_area2 = torch.cat(hidden_states_area2, dim=1)  # Shape: (batch_size, seq_len, hidden_size_area2)
 
         return predicted_positions, hidden_states_area1, hidden_states_area2
+
+
+def evaluate_rnn_decoder(model, dataloader, criterion, device):
+    """
+    Evaluate a model on a test set.
+
+    Parameters:
+        model (nn.Module): Trained PyTorch model.
+        dataloader (DataLoader): DataLoader for the test set.
+        criterion: Loss function (e.g., nn.MSELoss).
+        device: Device (e.g., "cpu" or "cuda").
+
+    Returns:
+        avg_loss: Average loss on the test set.
+        predictions: List of predictions for all test samples.
+        targets: List of ground-truth targets for all test samples.
+    """
+    model.eval()  # Set the model to evaluation mode
+    test_loss = 0.0
+    predictions, targets = [], []
+
+    with torch.no_grad():  # Disable gradient calculations
+        for X_batch, y_batch, seq_lengths in dataloader:
+            X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+
+            # Forward pass
+            outputs = model(X_batch, seq_lengths)
+
+            # Compute loss
+            loss = criterion(outputs, y_batch)
+            test_loss += loss.item() * X_batch.size(0)  # Accumulate loss
+
+            # Store predictions and targets for metric calculations
+            predictions.append(outputs.cpu())
+            targets.append(y_batch.cpu())
+
+    # Combine all predictions and targets
+    predictions = torch.cat(predictions, dim=0)
+    targets = torch.cat(targets, dim=0)
+
+    # Average loss over all samples
+    avg_loss = test_loss / len(dataloader.dataset)
+    return avg_loss, predictions, targets

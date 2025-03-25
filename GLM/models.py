@@ -28,65 +28,71 @@ def prs_double_penalty(basis_x_list, S_list, y=None, fit_intercept=True, cauchy=
     cap_max=10e2
 
     #Estimate sigma
-    sigma = numpyro.sample("sigma", dist.HalfCauchy(1.0))
+    sigma = numpyro.sample("sigma", dist.HalfCauchy(3.0))
 
     if fit_intercept:
         intercept = numpyro.sample("intercept", dist.Normal(0, 10))
 
     for i in range(num_vars):
-        basis_x = basis_x_list[i]
-        S = S_list[i]
-        n_basis = basis_x.shape[1]
-        # Step 1: Add Jitter
-        S_jittered = S + jitter * jnp.eye(S.shape[0])
-
-        # Step 2: Eigen-decomposition
-        eigenvalues, eigenvectors = jnp.linalg.eigh(S_jittered)
-
-        # Step 3: Apply Log Transform to Eigenvalues
-        eigenvalues_log = jnp.log1p(eigenvalues)  # Log-transform to reduce disparity
-
-        # Step 4: Cap Small and Large Eigenvalues
-        eigenvalues_capped = jnp.clip(eigenvalues_log, cap_min, cap_max)
-
-        # Step 5: Normalize Eigenvalues
-        eigenvalues_normalized = eigenvalues_capped / jnp.max(eigenvalues_capped)
-
-        # Step 6: Reconstruct the Stabilized Penalty Matrix
-        S_stabilized = eigenvectors @ jnp.diag(eigenvalues_normalized) @ eigenvectors.T
-        S=S_stabilized
-
-        # Perform eigen-decomposition to identify the null space
-        eigenvalues, eigenvectors = linalg.eigh(S)
-
-        # Identify indices of null space eigenvalues (those close to zero)
-        null_space_indices = jnp.where(jnp.isclose(eigenvalues, 0, atol=1e-5), size=eigenvalues.shape[0])[0]
-
-        # Select null space columns from eigenvectors using null_space_indices
-        null_space_columns = eigenvectors[:, null_space_indices]
-
-        # Construct the S_star matrix for null space penalty
-        S_star = null_space_columns @ null_space_columns.T
-
-        # Primary smoothing parameter
-        lambda_j = numpyro.sample(f"lambda_j_{i}", dist.HalfCauchy(cauchy))
-
-        # Additional shrinkage parameter for double penalty
-        lambda_star = numpyro.sample(f"lambda_star_{i}", dist.HalfCauchy(cauchy))
-
-        # Combine S and S_star with jitter for numerical stability
-        S_jittered = lambda_j * S + lambda_star * S_star + jnp.eye(S.shape[0]) * jitter
-
-        # Cholesky decomposition for stable covariance calculation
-        L = jnp.linalg.cholesky(S_jittered)
-
-        # Covariance matrix from Cholesky factor
-        covariance_matrix = jnp.linalg.inv(L.T @ L) / sigma ** 2
         varname = f"beta_{beta_x_names[i]}" if beta_x_names else f"beta_{i}"
+        basis_x = basis_x_list[i]
+        # basis function type
+        if basis_x.shape[1] > 1:
+            S = S_list[i]
+            n_basis = basis_x.shape[1]
+            # Step 1: Add Jitter
+            S_jittered = S + jitter * jnp.eye(S.shape[0])
 
-        beta = numpyro.sample(varname,
-                              dist.MultivariateNormal(loc=jnp.zeros(n_basis),
-                                                      covariance_matrix=covariance_matrix))
+            # Step 2: Eigen-decomposition
+            eigenvalues, eigenvectors = jnp.linalg.eigh(S_jittered)
+
+            # Step 3: Apply Log Transform to Eigenvalues
+            eigenvalues_log = jnp.log1p(eigenvalues)  # Log-transform to reduce disparity
+
+            # Step 4: Cap Small and Large Eigenvalues
+            eigenvalues_capped = jnp.clip(eigenvalues_log, cap_min, cap_max)
+
+            # Step 5: Normalize Eigenvalues
+            eigenvalues_normalized = eigenvalues_capped / jnp.max(eigenvalues_capped)
+
+            # Step 6: Reconstruct the Stabilized Penalty Matrix
+            S_stabilized = eigenvectors @ jnp.diag(eigenvalues_normalized) @ eigenvectors.T
+            S=S_stabilized
+
+            # Perform eigen-decomposition to identify the null space
+            eigenvalues, eigenvectors = linalg.eigh(S)
+
+            # Identify indices of null space eigenvalues (those close to zero)
+            null_space_indices = jnp.where(jnp.isclose(eigenvalues, 0, atol=1e-5), size=eigenvalues.shape[0])[0]
+
+            # Select null space columns from eigenvectors using null_space_indices
+            null_space_columns = eigenvectors[:, null_space_indices]
+
+            # Construct the S_star matrix for null space penalty
+            S_star = null_space_columns @ null_space_columns.T
+
+            # Primary smoothing parameter
+            lambda_j = numpyro.sample(f"lambda_j_{i}", dist.HalfCauchy(cauchy))
+
+            # Additional shrinkage parameter for double penalty
+            lambda_star = numpyro.sample(f"lambda_star_{i}", dist.HalfCauchy(cauchy))
+
+            # Combine S and S_star with jitter for numerical stability
+            S_jittered = lambda_j * S + lambda_star * S_star + jnp.eye(S.shape[0]) * jitter
+
+            # Cholesky decomposition for stable covariance calculation
+            L = jnp.linalg.cholesky(S_jittered)
+
+            # Covariance matrix from Cholesky factor
+            covariance_matrix = jnp.linalg.inv(L.T @ L) / sigma ** 2
+
+            beta = numpyro.sample(varname,
+                                  dist.MultivariateNormal(loc=jnp.zeros(n_basis),
+                                                          covariance_matrix=covariance_matrix))
+        else:
+            # bayesian lasso
+            tau = numpyro.sample("tau", dist.HalfCauchy(2.0))
+            beta = numpyro.sample(varname, dist.Laplace(0, tau).expand([1]))
 
         beta_list.append(beta)
 
@@ -144,7 +150,7 @@ def baseline_noise_model(y=None):
 def prs_hyperlambda(basis_x_list, S_list, y=None, fit_intercept=True, cauchy=0.1, sigma=1.0, jitter=1e-6,
                     tensor_basis_list=None, S_tensor_list=None, cat_basis=None, beta_x_names=None, cat_beta_names=None):
     """
-    Empiricial bayes (learn priors) MCMC version with wiggliness priors per variable and optimized lambda_param.
+    Empiricial bayesish (learn priors) MCMC version with wiggliness priors per variable and optimized lambda_param.
     This version supports multiple univariate smooths and multiple tensor product smooths for interactions.
 
     Parameters:

@@ -11,6 +11,26 @@ from PacTimeOrig.models import lossfn
 #TODO: make training loop for non-variable length
 #TODO: make training loop for only pulling at the end, like a decision variable.
 
+
+
+
+# def train_basic_rnn(model,criterion,optimizer,epochs=20):
+#     # Training loop
+#     epochs = epochs
+#     h = torch.zeros(hidden_size)  # Initial hidden state
+#     for epoch in range(epochs):
+#         optimizer.zero_grad()
+#         h = torch.zeros(hidden_size)  # Reset hidden state for each epoch
+#         loss = 0
+#         for t in range(T):
+#             x_t = x_data[t:t + 1]  # Input at time t
+#             y_t = y_data[t:t + 1]  # Target at time t
+#             y_pred, h = rnn(x_t, h)
+#             loss += loss_fn(y_pred, y_t)
+#         loss.backward()
+#         optimizer.step()
+#         print(f"Epoch {epoch + 1}, Loss: {loss.item()}")
+
 def train_masked_rnn(model, dataloader, criterion, optimizer, device, num_epochs=10,outcard=2):
     '''
     Train a masked RNN model with variable length sequences
@@ -28,6 +48,8 @@ def train_masked_rnn(model, dataloader, criterion, optimizer, device, num_epochs
             # Forward pass
             if outcard == 2:
                 outputs, _ = model(X_batch, seq_lengths)
+            elif outcard == 1:
+                outputs = model(X_batch, seq_lengths)
             elif outcard == 3:
                 outputs, _,_ = model(X_batch, seq_lengths)
 

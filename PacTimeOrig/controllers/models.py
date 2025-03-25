@@ -217,7 +217,6 @@ def create_loss_function_global(generate_rbf_basis, ctrltype):
                 return x, u_out
 
             x, u_out = jax.lax.fori_loop(0, N, loop_body, (x, u_out))
-
         elif ctrltype == 'pvif':
             def loop_body(k, val):
                 x, u_out, int_e_pos_1, int_e_pos_2 = val

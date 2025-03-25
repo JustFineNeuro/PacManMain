@@ -16,184 +16,399 @@ import numpy as np
 import patsy
 import jax
 import jax.numpy as jnp
-from GLM.utils import PatsyTransformer, calculate_aic_bic_poisson
+from GLM.utils import PatsyTransformer, calculate_aic_bic_poisson,smoothing_penalty_matrix_sklearn
 from GLM import models as mods
 from sklearn.metrics import mean_poisson_deviance
 from sklearn.pipeline import make_pipeline, Pipeline
+from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.linear_model import PoissonRegressor,LogisticRegression
 from sklearn.model_selection import TimeSeriesSplit, train_test_split, cross_val_score, GridSearchCV
+from scipy.optimize import minimize
+from scipy.linalg import block_diag
+import re
 
 
-# TODO: Out fo sample testing on models using X_test and y_test + setting distinct subsets of data without breaiking temporality
-# TOdo: confidence bounds on predicitons might need to refit the model with statsmodels or bootstrap the standard error
-# TODO circular shift
-# TODO: stimulis history coding
+def poisson_nll_scorer(y_true, y_pred):
+    """
+    Poisson Negative Log-Likelihood Scorer for Model Selection.
+    Lower is better.
+    """
+    return -np.sum(y_true * np.log(y_pred) - y_pred)  # Poisson NLL
+
+
+def gaussian_nll_scorer(y_true, y_pred):
+    """
+    gaussian Negative Log-Likelihood Scorer for Model Selection.
+    Lower is better.
+    """
+    return -np.sum(y_true - y_pred)  # gaussian NLL
+
+def second_order_difference_matrix(n_bases):
+    """
+    Constructs a second-order difference matrix (D2) for smoothing penalty.
+    """
+    D2 = np.zeros((n_bases - 2, n_bases))
+    for i in range(n_bases - 2):
+        D2[i, i] = 1
+        D2[i, i + 1] = -2
+        D2[i, i + 2] = 1
+    return D2
+
+def extract_df_from_te(te_term):
+    """
+    Extracts the df value from a te() term containing nested cr() functions.
+    Example input: 'te(cr(speed, df=3), cr(reldist, df=3))'
+    Output: 3  (assuming all df values inside te() are the same)
+    """
+    # Regex pattern to find `cr(variable, df=N)`
+    cr_pattern = re.compile(r'cr\(\s*\w+\s*,\s*df\s*=\s*(\d+)\s*\)')
+
+    # Find all `df` values inside the `te()` term
+    df_matches = cr_pattern.findall(te_term)
+
+    # Convert to integers
+    df_values = [int(df) for df in df_matches]
+
+    # Return the first df value (assuming they are all the same)
+    return df_values[0] if df_values else None
+
+def extract_variable_basis_from_formula(formula):
+    """
+    Extracts the variable names and the number of basis functions (df)
+    from a Patsy formula string.
+
+    Example:
+        formula = "y ~ cr(speed, df=12) + cr(reldist, df=8)"
+        Output: {'speed': 12, 'reldist': 8}
+    """
+    model_desc = patsy.ModelDesc.from_formula(formula)
+    termlist = model_desc.rhs_termlist
+    factors = []
+    for term in termlist:
+        for factor in term.factors:
+            factors.append(factor.name())
+
+    return factors
 
 
 
 
 class PoissonGLM:
-    def __init__(self):
-        '''
-
-        :param spl_df: List indexing continuous variables and indexing number of spline bases to use
-        :param spl_order: List indexing continuous variables and indexing order of spline bases to use
-        '''
-        self.fit_params = None
-        self.test_size = None
-        self.scores = None
-        self.formulas = None
+    def __init__(self, smooth_lambda=0.001):
+        """
+        Poisson GLM with smoothness regularization.
+        """
+        self.smooth_lambda = smooth_lambda  # Regularization weight
         self.pipeline = None
+        self.formulas = None
+        self.scores = None
+        self.best_pipeline = None
         self.X = None
         self.y = None
 
-    def add_data(self, X=None, y=None):
-        '''
-        Add data before splitting
-        :return:
-        '''
+    def add_data(self, X, y):
+        """
+        Add data before splitting.
+        """
         self.X = X
         self.y = y
-
         return self
 
-    def split_test(self, test_size=0.2):
-        '''
-        Add data before splitting
-        :return:
-        '''
-        self.test_size = test_size
-        self.X, self.X_test, self.y, self.y_test = train_test_split(self.X, self.y, test_size=test_size,
-                                                                    random_state=42)
-
-        return self
-
-    def make_preprocessor(self, formulas=None, metric='cv', l2reg=0.0001, solver='lbfgs'):
-        '''
-
-        :param solver:
-        :param metric: 'cv','score'
-        :param l2reg: l2 regularization
-        :param formulas: model formulas in patsy format
-        :return:
-        '''
+    def make_preprocessor(self, formulas=None, metric='cv'):
+        """
+        Builds a Patsy-based feature pipeline.
+        """
         self.formulas = formulas
-        if type(formulas) is list:
-            '''
-            For model selection 
-            '''
-            if metric == 'cv':
-                # Build the pipeline
-                self.pipeline = Pipeline([
-                    ('patsy', PatsyTransformer(formula=formulas[0])),  # Placeholder formula
-                    ('model', PoissonRegressor(alpha=l2reg, solver=solver))
-                ])
-            elif metric == 'score':
-                #Make a list of pipelines to iterate over
-                pipelines = []
-                for formula in formulas:
-                    pipelines.append(Pipeline([
-                        ('patsy', PatsyTransformer(formula=formula)),  # Placeholder formula
-                        ('model', PoissonRegressor(alpha=l2reg, solver=solver))
-                    ]))
-                self.pipeline = pipelines
-
-        elif type(formulas) is str:
+        if isinstance(formulas, list):
             self.pipeline = Pipeline([
-                ('patsy', PatsyTransformer(formula=formulas)),  # Placeholder formula
-                ('model', PoissonRegressor(alpha=l2reg, solver=solver))
+                ('patsy', PatsyTransformer(formula=formulas[0]))  # Placeholder formula
             ])
-
+        elif isinstance(formulas, str):
+            self.pipeline = Pipeline([
+                ('patsy', PatsyTransformer(formula=formulas))
+            ])
         return self
+
+    def poisson_nll(self, beta, X, y, S, smooth_lambda):
+        """
+        Computes Poisson negative log-likelihood + smoothness penalty.
+        """
+        eta = X @ beta  # Linear predictor
+        mu = np.exp(eta)  # Poisson mean (inverse link function)
+
+        # Poisson log-likelihood
+        poisson_ll = np.sum(y * eta - mu)
+
+        if beta.shape[0]>1:
+        # Smoothness penalty using block matrix
+            smooth_penalty = smooth_lambda * np.sum((S @ beta[1:]) ** 2)
+        else:
+            smooth_penalty = 0
+
+        return -poisson_ll + smooth_penalty  # Negative log-likelihood for minimization
 
     def fit(self, params={'cv': 5, 'shuffleTime': True}):
-        '''
-        Main call to fit a model
-        :param params:
-        :return:
-        '''
+        """
+        Fit Poisson GLM with smoothing regularization.
+        """
         self.fit_params = params
 
-        # Optimizing over different models via cross-validation
-        if type(self.formulas) is list:
-            # Do cross-validation metrics
-            if params['cv'] > 0:
-                self.scores = pd.DataFrame(columns=['mean', 'std', 'model'])
-                # Setup all formula to optimize over
-                param_grid = {
-                    'patsy__formula': self.formulas
-                }
+        if isinstance(self.formulas, list):
+            self.scores = pd.DataFrame(columns=['aic', 'bic', 'model'])
 
-                # Are we using TimeSeriesShuffle?
-                if params['shuffleTime'] is True:
-                    cv = TimeSeriesSplit(n_splits=params['cv'])
+            for formula in self.formulas:
+                pipeline = Pipeline([
+                    ('patsy', PatsyTransformer(formula=formula))
+                ])
 
-                    # Grid search
-                    grid_search = GridSearchCV(
-                        estimator=self.pipeline,
-                        param_grid=param_grid,
-                        scoring='neg_mean_poisson_deviance',
-                        cv=cv,
-                        n_jobs=-1
-                    )
+                # Transform design matrix
+                patsy_transformer = pipeline.named_steps['patsy']
+                X_transformed = patsy_transformer.fit_transform(self.X,self.y)
+                factors = extract_variable_basis_from_formula(formula)
 
+                # Check if formula is just "y ~ 1" (Intercept-only model)
+                if re.fullmatch(r"y\s*~\s*1", formula.strip()):
+                    S = np.zeros((X_transformed.shape[1], X_transformed.shape[1]))  # No smoothing needed
                 else:
-                    # Grid search
-                    grid_search = GridSearchCV(
-                        estimator=self.pipeline,
-                        param_grid=param_grid,
-                        scoring='neg_mean_poisson_deviance',
-                        cv=params['cv'],
-                        n_jobs=-1
-                    )
+                    # Extract basis function counts
+                    # Compute block-diagonal smoothness penalty matrix
+                    S = []
 
-                grid_search.fit(self.X, self.y)
-                cv_results = pd.DataFrame(grid_search.cv_results_)
-                self.scores = cv_results[['param_patsy__formula', 'mean_test_score', 'std_test_score']]
-                self.scores = self.scores.rename(columns={'param_patsy__formula': 'model'})
-                self.best_fit_from_search = grid_search.best_estimator_.fit(self.X, self.y)
-                self.best_pipeline = grid_search.best_estimator_
+                    for key in factors:
+                        print(key)
+                        if key.find('te') >-1:
+                            #get n bases and make tensor
+                            nbase=extract_df_from_te(key)
+                            S.append(smoothing_penalty_matrix_sklearn(nbase1=nbase, nbase2=nbase, is_tensor=True))
+                        else:
+                            #get n bases and make it
+                            nbase=extract_df_from_te(key)
+                            S.append(smoothing_penalty_matrix_sklearn(nbase1=nbase, nbase2=None, is_tensor=False))
+                    S = block_diag(*S)
 
-            elif params['cv'] <= 0:
+                y_data = self.y
 
-                self.scores = pd.DataFrame(columns=['aic', 'bic', 'model'])
+                # Initialize beta
+                beta_init = np.zeros(X_transformed.shape[1])
 
-                for i, pipeline in enumerate(self.pipeline, 1):
-                    #Fit the formula
-                    pipeline.fit(self.X, self.y)
+                # Optimize Poisson NLL with smoothness regularization
+                res = minimize(
+                    self.poisson_nll, beta_init, args=(X_transformed, y_data, S, self.smooth_lambda),
+                    method='L-BFGS-B'
+                )
 
-                    # Get pipeline info
-                    model = pipeline.named_steps['model']  # Adjust based on the actual name in your pipeline
-                    patsy_transformer = pipeline.named_steps['patsy']
-                    k = patsy_transformer.transform(self.X).shape[1] + 1
-                    #Make predicted data
-                    y_pred = pipeline.predict(self.X)
-                    [aic, bic] = calculate_aic_bic_poisson(len(self.y), mean_poisson_deviance(self.y, y_pred), k)
-                    self.scores.loc[len(self.scores)] = [aic, bic, patsy_transformer.formula]
-                    #TODO:  self.best_from_search
+                # Store best model parameters
+                beta_opt = res.x
+                y_pred = np.exp(X_transformed @ beta_opt)
 
-        elif type(self.formulas) is str:
-            NotImplemented
-            # TODO fit a single model
-            #TODO: Cv (time or kfold) through cross-val score, or AIC/BIC
-        #     if params['shuffleTime'] is True:
-        #         cv = TimeSeriesSplit(n_splits=params['cv'])
-        #
-        # score = cross_val_score(pipeline, X, y, cv=tscv, scoring='neg_mean_poisson_deviance').mean()
-        # scores[f'Model {i}'] = score
-        # self.pipeline.fit(self.X, self.y)
+                # Compute AIC/BIC
+                poisson_deviance = mean_poisson_deviance(y_data, y_pred)
+                k = X_transformed.shape[1]  # Number of parameters
+                aic, bic = calculate_aic_bic_poisson(len(y_data), poisson_deviance, k)
+                self.scores.loc[len(self.scores)] = [aic, bic, formula]
+
+                # Store best model
+                if aic == self.scores['aic'].min():
+                    self.best_pipeline = pipeline
+                    self.best_beta = beta_opt
+                    self.best_formula = formula
+
         return self
 
-    def predict(self, pred_data, predict_params={'data': 'X', 'whichmodel': 'best'}):
-        #TODO: make an intelligent search over all model terms and make predicted tuning curves
-        '''
-            predict at specific levels to make estimated curves to comapre against empirical
-        '''
-        design_matrix = self.best_pipeline[:-1].transform(pred_data)  # Transform without the final model step
-        model = self.best_pipeline.named_steps['model']
-        linear_predictor = model.intercept_ + design_matrix.dot(model.coef_)
-        self.predicted_y = np.exp(linear_predictor)  # Poisson GLM applies exponential to linear predictor
+    def predict(self, pred_data):
+        """
+        Predict on new data using the best model.
+        """
+        if not isinstance(pred_data, pd.DataFrame):
+            raise ValueError("Input data must be a pandas DataFrame with matching column names.")
 
+        design_matrix = self.best_pipeline.named_steps['patsy'].transform(pred_data)
+        eta_pred = design_matrix @ self.best_beta
+        return np.exp(eta_pred)  # Poisson GLM applies exp transformation
+
+class PoissonGLMEstimator(BaseEstimator, RegressorMixin):
+    def __init__(self, formula='y ~ 1', smooth_lambda=0.001):
+        """
+        Poisson GLM with smoothing regularization, sklearn-compatible for GridSearchCV.
+        """
+        self.formula = formula
+        self.smooth_lambda = smooth_lambda  # Regularization weight
+        self.pipeline = None
+        self.X_train = None
+        self.y_train = None
+        self.best_beta = None
+
+    def fit(self, X, y):
+        """
+        Fit the Poisson GLM using smoothing regularization.
+        """
+        self.X_train = X
+        self.y_train = y
+
+        # Create a PatsyTransformer pipeline
+        self.pipeline = Pipeline([
+            ('patsy', PatsyTransformer(formula=self.formula))
+        ])
+
+        # Transform design matrix
+        patsy_transformer = self.pipeline.named_steps['patsy']
+        X_transformed = patsy_transformer.fit_transform(X, y)
+        factors = extract_variable_basis_from_formula(self.formula)
+
+        # Check if formula is just "y ~ 1" (Intercept-only model)
+        if re.fullmatch(r"y\s*~\s*1", self.formula.strip()):
+            S = np.zeros((X_transformed.shape[1], X_transformed.shape[1]))  # No smoothing needed
+        else:
+            # Extract basis function counts
+            # Compute block-diagonal smoothness penalty matrix
+            S = []
+            for key in factors:
+                print(key)
+                if key.find('te') > 0:
+                    # get n bases and make tensor
+                    nbase = extract_df_from_te(key)
+                    S.append(smoothing_penalty_matrix_sklearn(nbase1=nbase, nbase2=nbase, is_tensor=True))
+                else:
+                    # get n bases and make it
+                    nbase = extract_df_from_te(key)
+                    S.append(smoothing_penalty_matrix_sklearn(nbase1=nbase, nbase2=None, is_tensor=False))
+            S = block_diag(*S)
+
+        # Initialize y and beta
+        y_data = y
+        beta_init = np.zeros(X_transformed.shape[1])
+
+        # Optimize Poisson NLL with smoothness regularization
+        res = minimize(
+            self.poisson_nll, beta_init, args=(X_transformed, y_data, S, self.smooth_lambda),
+            method='L-BFGS-B'
+        )
+
+        # Store optimized coefficients
+        self.best_beta = res.x
+
+        return self
+
+    def poisson_nll(self, beta, X, y, S, smooth_lambda):
+        """
+        Computes Poisson negative log-likelihood + smoothness penalty.
+        """
+        eta = X @ beta  # Linear predictor
+        mu = np.exp(eta)  # Poisson mean (inverse link function)
+
+        # Poisson log-likelihood
+        poisson_ll = np.sum(y * eta - mu)
+        if beta.shape[0]>1:
+        # Smoothness penalty using block matrix
+            smooth_penalty = smooth_lambda * np.sum((S @ beta[1:]) ** 2)
+        else:
+            smooth_penalty = 0
+
+        return -poisson_ll + smooth_penalty  # Negative log-likelihood for minimization
+
+    def predict(self, X):
+        """
+        Predict on new data.
+        """
+        if self.best_beta is None:
+            raise ValueError("Model is not fitted yet!")
+
+        design_matrix = self.pipeline.named_steps['patsy'].transform(X)
+        eta_pred = design_matrix @ self.best_beta
+        return np.exp(eta_pred)  # Poisson GLM applies exp transformation
+
+class GaussianGLMEstimator(BaseEstimator, RegressorMixin):
+    def __init__(self, formula='y ~ 1', smooth_lambda=0.001, l1_lambda=0):
+        """
+        Poisson GLM with smoothing regularization, sklearn-compatible for GridSearchCV.
+        """
+        self.formula = formula
+        self.smooth_lambda = smooth_lambda  # Regularization weight
+        self.l1_lambda = l1_lambda
+        self.pipeline = None
+        self.X_train = None
+        self.y_train = None
+        self.best_beta = None
+
+    def fit(self, X, y):
+        """
+        Fit the Poisson GLM using smoothing regularization.
+        """
+        self.X_train = X
+        self.y_train = y
+
+        # Create a PatsyTransformer pipeline
+        self.pipeline = Pipeline([
+            ('patsy', PatsyTransformer(formula=self.formula))
+        ])
+
+        # Transform design matrix
+        patsy_transformer = self.pipeline.named_steps['patsy']
+        X_transformed = patsy_transformer.fit_transform(X, y)
+        factors = extract_variable_basis_from_formula(self.formula)
+
+        # Check if formula is just "y ~ 1" (Intercept-only model)
+        if re.fullmatch(r"y\s*~\s*1", self.formula.strip()):
+            S = np.zeros((X_transformed.shape[1], X_transformed.shape[1]))  # No smoothing needed
+        else:
+            # Extract basis function counts
+            # Compute block-diagonal smoothness penalty matrix
+            S = []
+            for key in factors:
+                print(key)
+                if key.find('te') > 0:
+                    # get n bases and make tensor
+                    nbase = extract_df_from_te(key)
+                    S.append(smoothing_penalty_matrix_sklearn(nbase1=nbase, nbase2=nbase, is_tensor=True))
+                else:
+                    # get n bases and make it
+                    nbase = extract_df_from_te(key)
+                    S.append(smoothing_penalty_matrix_sklearn(nbase1=nbase, nbase2=None, is_tensor=False))
+            S = block_diag(*S)
+
+        # Initialize y and beta
+        y_data = y
+        beta_init = np.zeros(X_transformed.shape[1])
+
+        # Optimize Gaussian NLL with smoothness regularization
+
+        res = minimize(
+            self.gaussian_nll, beta_init, args=(X_transformed, y_data, S, self.smooth_lambda, self.l1_lambda),
+            method='L-BFGS-B'
+        )
+
+        # Store optimized coefficients
+        self.best_beta = res.x
+
+        return self
+
+    def gaussian_nll(self, beta, X, y, S, smooth_lambda, l1_lambda=0):
+        """
+        Computes Gaussian negative log-likelihood + smoothness penalty.
+        """
+        y_hat = X @ beta  # Linear predictor
+
+        # Gaussian log-likelihood
+        gaussian_ll = np.sum(np.power(y - y_hat, 2)) / 2
+        if beta.shape[0]>1:
+        # Smoothness penalty using block matrix
+            smooth_penalty = smooth_lambda * np.sum((S @ beta[1:]) ** 2)
+        else:
+            smooth_penalty = 0
+
+        L1 = l1_lambda * np.sum(np.abs(beta[1:]))
+        return -gaussian_ll + smooth_penalty + L1  # Negative log-likelihood for minimization
+
+    def predict(self, X):
+        """
+        Predict on new data.
+        """
+        if self.best_beta is None:
+            raise ValueError("Model is not fitted yet!")
+
+        design_matrix = self.pipeline.named_steps['patsy'].transform(X)
+        eta_pred = design_matrix @ self.best_beta
+        return eta_pred  # Poisson GLM applies exp transformation
 
 class LogisticGLM:
     def __init__(self):

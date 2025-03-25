@@ -234,7 +234,11 @@ def get_psth(datafile, win_shift=75, sub_start=0):
 
 def get_psth_EMU(datafile):
     psths = [pd.DataFrame(x) for x in datafile['spikes'][0]]
-    return psths
+    #Get areas
+    flat_array = np.array(datafile['brain_region'][0][0][0]).ravel()
+    areas = np.array([item[0] for item in flat_array])
+
+    return psths, areas
 
 
 def retrievepositions(datafile, dattype='nhp', rescale = 0.001):
@@ -396,24 +400,20 @@ def retrievepositions(datafile, dattype='nhp', rescale = 0.001):
             pos = pd.DataFrame()
 
             x = datafile['x'][0][trial].flatten().astype('float32')
-            y = datafile['x'][0][trial].flatten().astype('float32')
+            y = datafile['y'][0][trial].flatten().astype('float32')
             xp = datafile['x_prey'][0][trial].astype('float32')
             yp = datafile['y_prey'][0][trial].astype('float32')
 
             if xp.shape[1] == 1:
                 tmp = np.vstack(
                     (x, y, xp[:, 0].flatten(), yp[:, 0].flatten())).transpose()
-                normalizer = np.tile(rescale, (1, 2))[0].reshape(-1, 1).transpose()
-                tmp = tmp*normalizer
-                # tmp = (tmp - normalizer) / normalizer
+                tmp = tmp*rescale
                 positions.append(pos.assign(selfXpos=tmp[:,0],selfYpos=tmp[:,1],prey1Xpos=tmp[:,2],prey1Ypos=tmp[:,3],
                            prey2Xpos=np.NAN,prey2Ypos=np.NAN,predXpos=np.NAN,predYpos=np.NAN))
 
             elif xp.shape[1] == 2:
                 tmp = np.vstack((x, y, xp[:, 0].flatten(), yp[:, 0].flatten(), xp[:, 1].flatten(),yp[:, 1].flatten())).transpose()
-                normalizer = np.tile(rescale, (1, 3))[0].reshape(-1,1).transpose()
-                tmp = tmp*normalizer
-                # tmp = (tmp-normalizer)/normalizer
+                tmp = tmp*rescale
                 positions.append(pos.assign(selfXpos=tmp[:, 0], selfYpos=tmp[:, 1], prey1Xpos=tmp[:, 2], prey1Ypos=tmp[:, 3],
                                prey2Xpos=tmp[:,4], prey2Ypos=tmp[:,5], predXpos=np.NAN, predYpos=np.NAN))
 

@@ -1,11 +1,6 @@
 import numpy as np
 import pandas as pd
-import os
-import re
-from scipy.io import loadmat
-from scipy.ndimage import gaussian_filter as gfilt
 from scipy.signal import savgol_filter as sgolay
-from scipy.signal import find_peaks
 import ruptures as rpt
 
 
@@ -321,10 +316,6 @@ def get_reaction_time(sessvars, kinematics):
     sessvars['rt'] = ReactionTime
 
     return sessvars
-
-
-
-
 
 
 def getclusterfeatures(sessionVars, positions, winlength=10):

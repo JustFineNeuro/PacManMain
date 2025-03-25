@@ -14,4 +14,4 @@ python C:/PacManMain/ChangeOfMind/scripts/ModelFitting.py --config /PacManMain/C
 
 
 export PYTHONPATH=/Users/user/PyCharmProjects/PacManMain
-python ModelFitting.py --config /Users/user/PycharmProjects/PacManMain/ChangeOfMind/config/modelfitpersess.yaml --mode main2
+python ModelFitting.py --config /Users/user/PycharmProjects/PacManMain/ChangeOfMind/config/modelfitpersess2.yaml --mode main2
